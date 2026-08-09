@@ -1,0 +1,53 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: graphrag-neo4j
+    ports:
+      - "7474:7474"   # Neo4j Browser (http://localhost:7474)
+      - "7687:7687"   # Bolt protocol
+    environment:
+      - NEO4J_AUTH=neo4j/demopassword12
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "-q", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama
+    container_name: graphrag-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # If you have an NVIDIA GPU + nvidia-container-toolkit installed, uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  app:
+    build: .
+    container_name: graphrag-app
+    depends_on:
+      - neo4j
+      - ollama
+    volumes:
+      - ./pdfs:/app/pdfs
+      - ./src:/app/src
+    env_file:
+      - .env
+    stdin_open: true
+    tty: true
+    # Container stays alive; run scripts manually via `docker compose exec app ...`
+    command: ["tail", "-f", "/dev/null"]
+
+volumes:
+  neo4j_data:
+  ollama_data:
