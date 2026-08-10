@@ -4,7 +4,7 @@ import fitz  # PyMuPDF
 
 import config
 from graph_db import GraphDB
-from llm import extract_triples
+from ner import extract_triples  # fast local extraction, no LLM calls
 
 
 def load_pdf_text(path: str) -> str:

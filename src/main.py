@@ -1,5 +1,6 @@
 from graph_db import GraphDB
-from llm import extract_query_entities, generate_answer
+from ner import extract_entities         # fast local extraction, no LLM calls
+from llm import generate_answer          # LLM still used for final answer synthesis
 
 
 def normalize(name: str) -> str:
@@ -7,7 +8,7 @@ def normalize(name: str) -> str:
 
 
 def answer_question(db: GraphDB, question: str) -> str:
-    entities = extract_query_entities(question)
+    entities = extract_entities(question)
     entities = [normalize(e) for e in entities if e.strip()]
     print(f"  [entities extracted: {entities}]")
 
@@ -33,7 +34,7 @@ def answer_question(db: GraphDB, question: str) -> str:
 
 def main():
     db = GraphDB()
-    print("Graph RAG demo — ask a question about the spatial neglect (type 'exit' to quit)\n")
+    print("Graph RAG demo — ask a question about the disease (type 'exit' to quit)\n")
 
     try:
         while True:

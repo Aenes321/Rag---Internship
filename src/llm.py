@@ -19,28 +19,6 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> st
     return response.json()["response"]
 
 
-EXTRACTION_SYSTEM = """You are a medical information extraction system.
-Extract factual relationships from the given text as a JSON list of triples.
-Each triple must have: "subject", "relation", "object".
-Use ONLY these relation types: TREATS, CAUSES, HAS_SYMPTOM, RISK_FACTOR_FOR,
-INTERACTS_WITH, DIAGNOSED_BY, COMPLICATION_OF, PREVENTS, ASSOCIATED_WITH.
-Keep subject/object names short (a few words), e.g. "metformin", "type 2 diabetes".
-Return ONLY valid JSON in this exact format:
-{"triples": [{"subject": "...", "relation": "...", "object": "..."}]}
-If no relevant facts are found, return {"triples": []}.
-Do not include any text outside the JSON."""
-
-
-def extract_triples(chunk_text: str):
-    prompt = f"Text:\n{chunk_text}\n\nExtract triples as JSON."
-    raw = _call_ollama(prompt, system=EXTRACTION_SYSTEM, json_mode=True)
-    try:
-        data = json.loads(raw)
-        return data.get("triples", [])
-    except (json.JSONDecodeError, AttributeError):
-        return []
-
-
 ENTITY_SYSTEM = """Extract the key medical entities (diseases, symptoms, drugs,
 treatments, tests, risk factors) mentioned in the user's question.
 Return ONLY valid JSON: {"entities": ["...", "..."]}
