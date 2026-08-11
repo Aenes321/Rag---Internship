@@ -13,4 +13,5 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
 PDF_DIR = os.getenv("PDF_DIR", "../pdfs")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 
+#SPACY_MODEL = os.getenv("SPACY_MODEL", "en_core_web_sm")
 SPACY_MODEL = os.getenv("SPACY_MODEL", "en_core_sci_sm")

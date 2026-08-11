@@ -28,8 +28,20 @@ def answer_question(db: GraphDB, question: str) -> str:
     if not facts:
         return "No related facts found in the graph."
 
-    source_snippets = list({f["source_text"] for f in facts if f.get("source_text")})[:8]
-    return generate_answer(question, facts, source_snippets)
+    # Extract source text snippets attached to retrieved relationships
+    snippets = []
+    for f in facts:
+        if f.get("source_text") and f["source_text"] not in snippets:
+            snippets.append(f["source_text"])
+
+    # Prioritize snippets that explicitly contain matched specific entities
+    prioritized_snippets = sorted(
+        snippets, 
+        key=lambda text: any(e in text.lower() for e in entities if len(e) > 3), 
+        reverse=True
+    )
+    # Pass the top 8 most relevant chunk texts to the LLM
+    return generate_answer(question, facts, prioritized_snippets[:8])
 
 
 def main():

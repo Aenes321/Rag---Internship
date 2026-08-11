@@ -56,7 +56,8 @@ class GraphDB:
             )
 
     def search_entities(self, query_text: str, limit: int = 5):
-        safe_query = _escape_lucene(query_text)
+        escaped = _escape_lucene(query_text)
+        safe_query = f"{escaped}* OR {escaped}~1"
         cypher = """
         CALL db.index.fulltext.queryNodes('entityIndex', $query_text) YIELD node, score
         RETURN node.name AS name, score
