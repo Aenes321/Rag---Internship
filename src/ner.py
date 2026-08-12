@@ -2,7 +2,7 @@ import re
 from itertools import combinations
 import spacy
 import config
-
+import unicodedata
 _nlp = None
 
 # Regex patterns for citations (e.g., "Choi et al.", "Choi et al. (2021)", "Choi et al., 2021")
@@ -12,12 +12,15 @@ CITATION_PATTERN = re.compile(
 
 DIGIT_PATTERN = re.compile(r'\b\d{3,}\b')
 
+# 1. Regex to strip PDF layout noise, page/box labels, and special symbols
+PDF_ARTIFACT_PATTERN = re.compile(r"[▸•*■▪│\|–—\t]|\b(box|page|fig|figure|table)\s*\d+\b", re.IGNORECASE)
+
 def extract_citations(text: str) -> list[str]:
     """Find author/year citation strings in text."""
     matches = CITATION_PATTERN.findall(text)
     clean_citations = []
     for m in matches:
-        norm = _normalize(m).rstrip("(").strip()
+        norm = _normalize(re.sub(r'[\(\)]', '', m))
         # Ensure it actually contains an author-like indicator
         if "et al" in norm or any(char.isdigit() for char in norm):
             clean_citations.append(norm)
@@ -33,6 +36,14 @@ def get_nlp():
 # Order matters: first matching keyword set wins. Keep specific relations
 # before the generic fallback.
 RELATION_KEYWORDS = [
+    # Captures non-significant / comparable outcomes
+    ("NO_DIFFERENCE_IN", ["no significant difference", "did not differ", "no difference", 
+        "comparable to", "similar improvement", "no statistical difference","remained similar", "did not show significant"]),
+    
+    # Captures significant improvements/outcomes
+    ("SHOWED_IMPROVEMENT_IN", ["significantly higher", "significant improvement", "greater improvement",
+        "superior to", "outperformed", "showed higher", "showed greater", "showed significant", "improved more",]),
+
     # Behavioral/task performance keywords
     ("MANIFESTS_AS", ["recite", "recites", "read", "reads", "omit", "omits", "presented with", "demonstrate", "displays"]),
     # Spatial Neglect Specific Relations
@@ -59,7 +70,7 @@ def classify_relation(sentence_text: str) -> str:
     for relation, keywords in RELATION_KEYWORDS:
         if any(kw in s for kw in keywords):
             return relation
-    return "ASSOCIATED_WITH"  # fallback: entities co-occur but no clear trigger word
+    return None  # fallback: entities co-occur but no clear trigger word
 
 
 def _normalize(name: str) -> str:
@@ -91,7 +102,7 @@ STOP_ENTITIES = {
     "procedures", "management", "care", "exposure", "regimen", "tasks", "task", "control group",
     "reading", "text", "string", "strings", "numerical string", 
     "evaluation", "assessment", "task", "tasks", "recite", "reciting",
-    "reading/writing", "full-text", "heading"
+    "reading/writing", "full-text", "heading", "training", "training session", "sessions", "session", "practice", "practices",
 
     # Broad Academic & Study Terminology
     "study", "studies", "trial", "trials", "paper", "author", "authors", 
@@ -104,6 +115,39 @@ STOP_ENTITIES = {
     "factor", "factors", "level", "levels", "type", "types", "form", "forms", 
     "role", "roles", "condition", "conditions", "system", "systems"
 }
+
+def _clean_entity_text(text: str) -> str:
+    """Strips PDF artifacts, normalizes spaces, and enforces a max token length."""
+    # Remove OCR symbols, bullets, and PDF layout labels
+    text = PDF_ARTIFACT_PATTERN.sub(" ", text)
+    # Remove floating digits/punctuation at start or end
+    text = re.sub(r"^[^\w]+|[^\w]+$", "", text)
+    # Normalize whitespaces
+    norm = _normalize(text)
+    
+    # Cap entities to max 5 words to avoid absorbing entire paragraphs/headers
+    words = norm.split()
+    if len(words) > 5:
+        norm = " ".join(words[:5])
+        
+    return norm
+
+def _get_bounded_phrase(token) -> str:
+    """Collects only immediate modifiers (compounds, adjectives, numbers) 
+    instead of traversing the full subtree.
+    """
+    allowed_deps = {"compound", "amod", "flat", "nmod", "nummod", "poss"}
+    
+    phrase_tokens = [
+        child for child in token.children if child.dep_ in allowed_deps
+    ]
+    phrase_tokens.append(token)
+    
+    # Sort tokens in their natural sentence order
+    phrase_tokens.sort(key=lambda x: x.i)
+    
+    raw_phrase = " ".join([t.text for t in phrase_tokens])
+    return _clean_entity_text(raw_phrase)
 
 def extract_entities(text: str):
     """Return deduplicated entity strings found in text (used at query time)."""
@@ -130,42 +174,70 @@ def extract_entities(text: str):
     return result
 
 
+
 def extract_triples(chunk_text: str):
-    """Return a list of {subject, relation, object} dicts for a chunk,
-    by pairing co-occurring entities within each sentence."""
-    doc = get_nlp()(chunk_text)
+    """Dependency-driven triple extraction with bounded entity lengths and PDF noise filtering."""
+    # Clean unicode artifacts
+    clean_text = unicodedata.normalize("NFKC", chunk_text).replace("\xad", "").replace("\u00ad", "")
+    doc = get_nlp()(clean_text)
     triples = []
 
     for sent in doc.sents:
-
-        relation = classify_relation(sent.text)
-        if not relation:
+        classified_rel = classify_relation(sent.text)
+        if not classified_rel:
             continue
 
-        seen = set()
-        ents = []
+        for token in sent:
+            if token.pos_ in ("VERB", "AUX") or token.dep_ == "ROOT":
+                subj = None
+                direct_obj = None
+                prep_objs = []
 
-        citations = extract_citations(sent.text)
-        for cite in citations:
-            if cite not in seen:
-                seen.add(cite)
-                ents.append(cite)
+                for child in token.children:
+                    # Capture Subjects
+                    if child.dep_ in ("nsubj", "nsubjpass"):
+                        candidate = _get_bounded_phrase(child)
+                        if candidate and not is_generic_entity(candidate):
+                            subj = candidate
 
-        for ent in sent.ents:
-            name = _normalize(ent.text)
-            if len(name) > 1 and name not in seen and not is_generic_entity(name):
-                seen.add(name)
-                ents.append(name)
+                    # Capture Direct Objects / Predicates
+                    elif child.dep_ in ("dobj", "attr", "acomp"):
+                        candidate = _get_bounded_phrase(child)
+                        if candidate and not is_generic_entity(candidate):
+                            direct_obj = candidate
 
-        if len(ents) < 2:
-            continue
+                    # Capture Prepositional Objects (e.g., "in VR")
+                    elif child.dep_ == "prep":
+                        for pchild in child.children:
+                            if pchild.dep_ in ("pobj", "pcomp"):
+                                candidate = _get_bounded_phrase(pchild)
+                                if candidate and not is_generic_entity(candidate):
+                                    prep_objs.append(candidate)
 
-        
-        for i in range(len(ents) - 1):
-            triples.append({
-                "subject": ents[i],
-                "relation": relation,
-                "object": ents[i + 1]
-            })
+                # Form Triples with Length Safeguards
+                if subj and direct_obj and len(subj) > 1 and len(direct_obj) > 1:
+                    triples.append({
+                        "subject": subj,
+                        "relation": classified_rel,
+                        "object": direct_obj
+                    })
+
+                if subj and prep_objs:
+                    for pobj in prep_objs:
+                        if len(pobj) > 1 and len(subj) > 1:
+                            triples.append({
+                                "subject": subj,
+                                "relation": classified_rel,
+                                "object": pobj
+                            })
+
+                elif direct_obj and prep_objs:
+                    for pobj in prep_objs:
+                        if len(pobj) > 1 and len(direct_obj) > 1:
+                            triples.append({
+                                "subject": direct_obj,
+                                "relation": classified_rel,
+                                "object": pobj
+                            })
 
     return triples

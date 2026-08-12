@@ -1,10 +1,11 @@
 import os
 import glob
 import fitz  # PyMuPDF
-
+import unicodedata
+import re
 import config
 from graph_db import GraphDB
-from ner import extract_triples  # fast local extraction, no LLM calls
+from ner import extract_triples  
 
 
 def load_pdf_text(path: str) -> str:
@@ -13,6 +14,19 @@ def load_pdf_text(path: str) -> str:
     for page in doc:
         text += page.get_text()
     doc.close()
+    # 1. Normalize Unicode characters (canonical decomposition/recomposition)
+    text = unicodedata.normalize("NFKC", text)
+
+    # 2. Strip soft hyphens explicitly
+    text = re.sub(r"\xad\s*", "", text)
+
+    # Hard hyphen at a line-wrap: "hyphen-\nated" -> "hyphenated"
+    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
+
+    # Remaining newlines are just line wraps, not paragraph breaks — join with a space
+    text = re.sub(r"\s*\n\s*", " ", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+
     return text
 
 
