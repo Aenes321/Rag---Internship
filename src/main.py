@@ -6,6 +6,10 @@ from llm import generate_answer          # LLM still used for final answer synth
 def normalize(name: str) -> str:
     return " ".join(name.strip().lower().split())
 
+def score_snippet(text: str, entities: list) -> int:
+    """Count total term occurrences to score snippet relevance."""
+    text_lower = text.lower()
+    return sum(text_lower.count(e) for e in entities if len(e) > 2)
 
 def answer_question(db: GraphDB, question: str) -> str:
     entities = extract_entities(question)
@@ -37,7 +41,7 @@ def answer_question(db: GraphDB, question: str) -> str:
     # Prioritize snippets that explicitly contain matched specific entities
     prioritized_snippets = sorted(
         snippets, 
-        key=lambda text: any(e in text.lower() for e in entities if len(e) > 3), 
+        key=lambda text: score_snippet(text, entities),  
         reverse=True
     )
     # Pass the top 8 most relevant chunk texts to the LLM

@@ -2,10 +2,10 @@ import os
 import glob
 import fitz  # PyMuPDF
 import unicodedata
-import re
 import config
 from graph_db import GraphDB
-from ner import extract_triples  
+from ner import extract_triples, get_nlp
+import re
 
 
 def load_pdf_text(path: str) -> str:
@@ -30,17 +30,33 @@ def load_pdf_text(path: str) -> str:
     return text
 
 
-def chunk_text(text: str, chunk_size: int):
-    chunks = []
-    for i in range(0, len(text), chunk_size):
-        chunk = text[i:i + chunk_size].strip()
-        if chunk:
-            chunks.append(chunk)
+def chunk_text(text: str, chunk_size: int, overlap_sentences: int = 1):
+    sentences = [s.text.strip() for s in get_nlp()(text).sents if s.text.strip()]
+    chunks, current, current_len = [], [], 0
+    for sent in sentences:
+        if current and current_len + len(sent) > chunk_size:
+            chunks.append(" ".join(current))
+            current = current[-overlap_sentences:]
+            current_len = sum(len(s) for s in current)
+        current.append(sent)
+        current_len += len(sent)
+    if current:
+        chunks.append(" ".join(current))
     return chunks
 
+# Define canonical mappings for domain-specific concepts
+CANONICAL_ENTITIES = {
+    "vr": "virtual reality",
+}
 
 def normalize(name: str) -> str:
-    return " ".join(name.strip().lower().split())
+    norm = " ".join(name.strip().lower().split())
+    
+    # 2. Map directly to canonical node if a variant exists
+    if norm in CANONICAL_ENTITIES:
+        return CANONICAL_ENTITIES[norm]
+
+    return norm
 
 
 def main():

@@ -40,24 +40,29 @@ class GraphDB:
         query = f"""
         MERGE (a:Entity {{name: $subject}})
         MERGE (b:Entity {{name: $object}})
-        MERGE (a)-[r:{rel_type}]->(b)
-        SET r.chunk_id = $chunk_id,
-            r.source_text = $chunk_text,
-            r.source_file = $source_file
+        MERGE (a)-[r:`{rel_type}`]->(b)
+        ON CREATE SET r.chunk_ids = [$chunk_id],
+                    r.source_texts = [$chunk_text],
+                    r.source_files = [$source_file]
+        ON MATCH SET
+            r.chunk_ids = CASE WHEN $chunk_id IN r.chunk_ids
+                                THEN r.chunk_ids ELSE r.chunk_ids + $chunk_id END,
+            r.source_texts = CASE WHEN $chunk_id IN r.chunk_ids
+                                THEN r.source_texts ELSE r.source_texts + $chunk_text END,
+            r.source_files = CASE WHEN $source_file IN r.source_files
+                                THEN r.source_files ELSE r.source_files + $source_file END
         """
         with self.driver.session() as session:
-            session.run(
-                query,
-                subject=subject,
-                object=obj,
-                chunk_id=chunk_id,
-                chunk_text=chunk_text,
-                source_file=source_file,
-            )
+            session.run(query, subject=subject, object=obj, chunk_id=chunk_id,
+                        chunk_text=chunk_text, source_file=source_file)
 
     def search_entities(self, query_text: str, limit: int = 5):
         escaped = _escape_lucene(query_text)
-        safe_query = f"{escaped}* OR {escaped}~1"
+        words = [w for w in escaped.split() if w]
+        if not words:
+            return []
+        # Tokenize words for Lucene multi-word prefix search
+        safe_query = " AND ".join([f"{w}*" for w in words])
         cypher = """
         CALL db.index.fulltext.queryNodes('entityIndex', $query_text) YIELD node, score
         RETURN node.name AS name, score
