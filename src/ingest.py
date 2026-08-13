@@ -31,7 +31,13 @@ def load_pdf_text(path: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int, overlap_sentences: int = 1):
-    sentences = [s.text.strip() for s in get_nlp()(text).sents if s.text.strip()]
+    nlp = get_nlp()
+    # Disable heavy NER during sentence segmentation for speed and memory safety
+    disable_pipes = [p for p in ["ner", "entity_ruler"] if p in nlp.pipe_names]
+    with nlp.select_pipes(disable=disable_pipes):
+        doc = nlp(text)
+        sentences = [s.text.strip() for s in doc.sents if s.text.strip()]
+
     chunks, current, current_len = [], [], 0
     for sent in sentences:
         if current and current_len + len(sent) > chunk_size:

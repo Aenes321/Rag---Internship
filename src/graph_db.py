@@ -78,10 +78,11 @@ class GraphDB:
         MATCH (n:Entity)-[r*1..{hops}]-(m:Entity)
         WHERE n.name IN $entity_names
         UNWIND r AS rel
+        UNWIND coalesce(rel.source_texts, [rel.source_text]) AS st
         RETURN DISTINCT startNode(rel).name AS source,
                type(rel) AS relation,
                endNode(rel).name AS target,
-               rel.source_text AS source_text
+               st AS source_text
         LIMIT $limit
         """
         with self.driver.session() as session:

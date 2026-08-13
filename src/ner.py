@@ -6,6 +6,14 @@ import unicodedata
 
 _nlp = None
 
+PRONOUNS = {
+    "it", "its", "they", "them", "their", "theirs", "he", "him", "his", 
+    "she", "her", "hers", "we", "us", "our", "ours", "you", "your", "yours", 
+    "i", "me", "my", "mine", "this", "that", "these", "those", "which", 
+    "who", "whom", "whose", "what", "whatever", "whichever", "whoever", 
+    "myself", "yourself", "himself", "herself", "itself", "ourselves", "themselves"
+}
+
 # Regex patterns for citations (e.g., "Choi et al.", "Choi et al. (2021)", "Choi et al., 2021")
 CITATION_PATTERN = re.compile(
     r'\b[A-Z][a-zA-Z\-]+(?:\s+et\s+al\.?|\s+and\s+[A-Z][a-zA-Z\-]+)?(?:\s*\(?\d{4}\)?)?\b'
@@ -33,12 +41,13 @@ def get_nlp():
     global _nlp
     if _nlp is None:
         _nlp = spacy.load(config.SPACY_MODEL)
-        ruler = _nlp.add_pipe(
-            "entity_ruler",
-            after="ner",
-            config={"overwrite_ents": True},
-        )
-        ruler.add_patterns(PATTERNS)
+        if "entity_ruler" not in _nlp.pipe_names:
+            ruler = _nlp.add_pipe(
+                "entity_ruler",
+                after="ner",
+                config={"overwrite_ents": True},
+            )
+            ruler.add_patterns(PATTERNS)
     return _nlp
 
 
@@ -90,12 +99,12 @@ def _normalize(name: str) -> str:
 def is_generic_entity(entity_text: str) -> bool:
     """Return True if the entity is an exact stop entity or consists entirely of stop words."""
     norm = entity_text.strip().lower()
-    if norm in STOP_ENTITIES:
+    if not norm or norm in PRONOUNS or norm in STOP_ENTITIES or len(norm) <= 1:
         return True
     
     # Split into individual words to check if ALL tokens are generic words
     words = norm.split()
-    if all(w in STOP_ENTITIES for w in words):
+    if all(w in STOP_ENTITIES or w in PRONOUNS for w in words):
         return True
         
     return False
@@ -144,10 +153,15 @@ def _clean_entity_text(text: str) -> str:
     return norm
 
 def _get_bounded_phrase(token) -> str:
-    """Extracts entity phrase including compounds, adjectives, and conjunctions."""
+    """Extract phrase while blocking pronoun tokens from being included."""
+    if token.pos_ == "PRON" or token.text.lower() in PRONOUNS:
+        return ""
+
     allowed_deps = {"compound", "amod", "flat", "nmod", "nummod", "poss", "conj"}
     
-    phrase_tokens = [child for child in token.children if child.dep_ in allowed_deps]
+    phrase_tokens = [
+        child for child in token.children
+        if child.dep_ in allowed_deps and child.pos_ != "PRON" and child.text.lower() not in PRONOUNS]
     phrase_tokens.append(token)
     phrase_tokens.sort(key=lambda x: x.i)
     
@@ -167,7 +181,7 @@ def extract_entities(text: str):
 
     citations = extract_citations(text)
     for cite in citations:
-        if cite not in seen and cite not in STOP_ENTITIES:
+        if cite not in seen and cite not in STOP_ENTITIES and cite not in PRONOUNS:
             seen.add(cite)
             result.append(cite)
 
@@ -185,40 +199,39 @@ def extract_triples(chunk_text: str):
     triples = []
     seen_triples = set()
 
+    last_valid_subject = None  # Heuristic for resolving pronouns across sentences
+
     for sent in doc.sents:
-        # 1. First preference: Schema-aligned keyword relation
         taxonomy_rel = classify_relation(sent.text)
 
         for token in sent:
-            # Look at verbs, root predicates, or auxiliary verbs
             if token.pos_ in ("VERB", "AUX") or token.dep_ == "ROOT":
-                
-                # Determine relation label: Prefer Taxonomy Keyword -> Fallback to dynamic Verb
                 relation_label = taxonomy_rel if taxonomy_rel else token.lemma_.upper()
                 
-                # Skip meaningless generic verbs when using dynamic fallback
                 if not taxonomy_rel and token.lemma_ in ("be", "have", "do", "use"):
                     continue
 
                 subjects = []
                 objects = []
 
-                # Find all subjects, direct objects, and prepositional targets
                 for child in token.children:
-                    # Nominal Subjects (Active or Passive)
+                    # Ignore pronoun children directly
+                    if child.pos_ == "PRON" or child.text.lower() in PRONOUNS:
+                        continue
+
+                    # Extract nominal subjects
                     if child.dep_ in ("nsubj", "nsubjpass"):
                         sub_phrase = _get_bounded_phrase(child)
                         if sub_phrase and not is_generic_entity(sub_phrase):
                             subjects.append(sub_phrase)
-                            # Handle conjunctions (e.g., "Aravind and Lamontagne")
                             for conj in child.children:
                                 if conj.dep_ == "conj":
                                     conj_phrase = _get_bounded_phrase(conj)
                                     if conj_phrase and not is_generic_entity(conj_phrase):
                                         subjects.append(conj_phrase)
 
-                    # Direct Objects, Attributes, Complements
-                    elif child.dep_ in ("dobj", "attr", "acomp", "oprd"):
+                    # Extract objects, complements, and passive agents
+                    elif child.dep_ in ("dobj", "attr", "acomp", "oprd", "agent"):
                         obj_phrase = _get_bounded_phrase(child)
                         if obj_phrase and not is_generic_entity(obj_phrase):
                             objects.append(obj_phrase)
@@ -227,15 +240,28 @@ def extract_triples(chunk_text: str):
                                 cphrase = _get_bounded_phrase(conj)
                                 if cphrase and not is_generic_entity(cphrase):
                                     objects.append(cphrase)
-                    # Prepositional Objects (e.g., "tested in VR")
+
+                    # Prepositional objects
                     elif child.dep_ == "prep":
                         for pchild in child.children:
-                            if pchild.dep_ in ("pobj", "pcomp"):
+                            if pchild.dep_ in ("pobj", "pcomp") and pchild.pos_ != "PRON" and pchild.text.lower() not in PRONOUNS:
                                 pobj_phrase = _get_bounded_phrase(pchild)
                                 if pobj_phrase and not is_generic_entity(pobj_phrase):
                                     objects.append(pobj_phrase)
+                                    for conj in pchild.children:
+                                        if conj.dep_ == "conj":
+                                            cphrase = _get_bounded_phrase(conj)
+                                            if cphrase and not is_generic_entity(cphrase):
+                                                objects.append(cphrase)
 
-                # Pair every subject with every object found around this verb
+                # Last-subject heuristic: Re-use previous valid subject if sentence used a pronoun
+                if not subjects and objects and last_valid_subject:
+                    subjects = [last_valid_subject]
+
+                if subjects:
+                    last_valid_subject = subjects[0]
+
+                # Pair valid non-pronoun subjects and objects
                 for subj in subjects:
                     for obj in objects:
                         if subj != obj and len(subj) > 1 and len(obj) > 1:
