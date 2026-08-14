@@ -16,7 +16,7 @@ PRONOUNS = {
 
 # Regex patterns for citations (e.g., "Choi et al.", "Choi et al. (2021)", "Choi et al., 2021")
 CITATION_PATTERN = re.compile(
-    r'\b[A-Z][a-zA-Z\-]+(?:\s+et\s+al\.?|\s+and\s+[A-Z][a-zA-Z\-]+)?(?:\s*\(?\d{4}\)?)?\b'
+    r'\b[A-Z][a-zA-Z\-]+(?:\s+et\s+al\.?|\s+and\s+[A-Z][a-zA-Z\-]+)?(?:\s*,?\s*\(?\d{4}\)?)?\b'
 )
 
 DIGIT_PATTERN = re.compile(r'\b\d{3,}\b')
@@ -54,47 +54,56 @@ def get_nlp():
 # Order matters: first matching keyword set wins. Keep specific relations
 # before the generic fallback.
 RELATION_KEYWORDS = [
-    # Spatial Neglect Specific Relations
-    ("ASSESSED_BY", ["assess", "evaluated by", "measured by", "score", "scale", "test", "cancellation", "bisection"]),
-    ("AFFECTS_REGION", ["lesion", "damage to", "parietal", "cortex", "hemisphere", "lobe", "pathology in"]),
-    ("SUBTYPE_OF", ["subtype", "manifests as", "classified as", "peripersonal", "extrapersonal", "personal neglect"]),
-
-    # Core Clinical Relations
-    ("TREATS", ["treat", "therapy", "treatment", "rehabilitation", "manage", "relieve", "alleviate", "adaptation", "stimulation"]),
-    ("CAUSES", ["cause", "causes", "leads to", "lead to", "results in", "result in", "triggers", "secondary to"]),
-    ("HAS_SYMPTOM", ["symptom", "present with", "presents with", "sign of", "characterized by", "manifested by", "deficit"]),
-    ("RISK_FACTOR_FOR", ["risk factor", "increases the risk", "increase the risk", "predispose"]),
-    ("INTERACTS_WITH", ["interact", "interaction", "contraindicat"]),
-    ("DIAGNOSED_BY", ["diagnos", "screen for", "detect", "confirmed by"]),
-    ("COMPLICATION_OF", ["complication", "sequela"]),
-    ("PREVENTS", ["prevent", "reduces the risk", "reduce the risk", "protect against"]),
-    
     # Captures non-significant / comparable outcomes
     ("NO_DIFFERENCE_IN", ["no significant difference", "did not differ", "no difference", 
-        "comparable to", "similar improvement", "no statistical difference","remained similar", "did not show significant"]),
+        "comparable to", "similar improvement", "no statistical difference","remained similar", "did not show significant","no change in", 
+        "statistically insignificant", "equivalent to"]),
     
     # Captures significant improvements/outcomes
     ("SHOWED_IMPROVEMENT_IN", ["significantly higher", "significant improvement", "greater improvement",
-        "superior to", "outperformed", "showed higher", "showed greater", "showed significant", "improved more",]),
+        "superior to", "outperformed", "showed higher", "showed greater", "showed significant", "improved more","significantly reduced", 
+        "significantly increased", "statistically significant"]),
 
-    # Behavioral/task performance keywords
-    ("MANIFESTS_AS", ["recite", "recites", "read", "reads", "omit", "omits", "presented with", "demonstrate", "displays"]),
+    # Spatial Neglect Specific Relations
     
+    ("AFFECTS_REGION", ["lesion in", "lesioned in", "damage to", "parietal", "cortex", "hemisphere", "lobe", "pathology in","structural damage", 
+        "localized to", "brain region", "cortical", "subcortical", "frontal", "temporal", "occipital", "parietal", "insula", "basal ganglia"]),
+    ("SUBTYPE_OF", ["subtype of", "classified as", "type of neglect", "peripersonal", "extrapersonal", "personal neglect", "egocentric", "allocentric", "form of neglect"]),
+    # Core Clinical Relations
+    ("TREATS", ["treatment for", "treated with", "therapy for", "rehabilitation of", "alleviate", "relieve"]),
+    ("PREVENTS", ["prevent", "reduces the risk", "reduce the risk", "protect against","prevented", "prevention of", "protects against"]),
+    ("CAUSES", ["cause", "causes", "leads to", "lead to", "results in", "result in", "triggers", "secondary to","induced by", "caused by",
+        "consequence of", "contributes to", "contributing to", "contributed to"]),
+    ("RISK_FACTOR_FOR", ["risk factor", "increases the risk", "increase the risk", "predispose to", "predisposing to", "predisposed to", "predisposition to"]),
+    ("COMPLICATION_OF", ["complication of", "sequela of","resulting from"]),
+    ("ASSESSED_BY", ["evaluated by", "measured by", "assessed using", "assessed by"]),
+    ("DIAGNOSED_BY", ["diagnosed by", "diagnosed with", "screened for", "screen for", "detected by", "confirmed by", "identified by"]),
+    ("HAS_SYMPTOM", ["characterized by", "manifested by", "symptom of", "presenting with", "presents with", "deficit in", "impairment in", "inattention to"]),
+    # Behavioral/task performance keywords
+    ("MANIFESTS_AS", ["recite", "recites", "read", "reads", "presented with", "demonstrate", "displays"]),
+    ("INTERACTS_WITH", ["interact", "interaction", "contraindicat", "contraindicated", "synergistic", "synergy", "combined with"]),
     # Generic fallback relation
-    ("ASSOCIATED_WITH", ["associated with", "related to", "co-occur", "co-occurred", "co-occurring", "correlated with"]),
+    ("ASSOCIATED_WITH", ["associated with", "related to", "co-occur", "co-occurred", "co-occurring", "correlated with", "linked to", "coupled with", "co-exist", "co-existed", "co-existing", "co-occurring", "co-occurred with", "co-occurring with", "co-exist with", "co-existed with", "co-existing with"]),
 ]
 
+COMPILED_RELATION_KEYWORDS = [
+    (
+        relation,
+        [re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE) for kw in keywords]
+    )
+    for relation, keywords in RELATION_KEYWORDS
+]
 
 def classify_relation(sentence_text: str) -> str:
-    s = sentence_text.lower()
-    for relation, keywords in RELATION_KEYWORDS:
-        if any(kw in s for kw in keywords):
+    """Classifies a sentence into a relation label using word-boundary matching."""
+    for relation, patterns in COMPILED_RELATION_KEYWORDS:
+        if any(pattern.search(sentence_text) for pattern in patterns):
             return relation
-    return None  # fallback: entities co-occur but no clear trigger word
-
+    return None
 
 def _normalize(name: str) -> str:
-    return " ".join(name.strip().lower().split())
+    clean = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\uFEFF\u00ad\u00a0]', ' ', name)
+    return " ".join(clean.strip().lower().split())
 
 def is_generic_entity(entity_text: str) -> bool:
     """Return True if the entity is an exact stop entity or consists entirely of stop words."""

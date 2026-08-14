@@ -19,6 +19,8 @@ def load_pdf_text(path: str) -> str:
 
     # 2. Strip soft hyphens explicitly
     text = re.sub(r"\xad\s*", "", text)
+    # 2. Strip hidden Unicode artifacts: Zero-Width Space (\u200b), soft hyphens etc.
+    text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\uFEFF\u00ad\u00a0\x07]', ' ', text)
 
     # Hard hyphen at a line-wrap: "hyphen-\nated" -> "hyphenated"
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
@@ -53,6 +55,8 @@ def chunk_text(text: str, chunk_size: int, overlap_sentences: int = 1):
 # Define canonical mappings for domain-specific concepts
 CANONICAL_ENTITIES = {
     "vr": "virtual reality",
+    "rct": "randomized controlled trial",
+    "usn": "unilateral spatial neglect",
 }
 
 def normalize(name: str) -> str:

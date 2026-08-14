@@ -2,7 +2,6 @@ import json
 import requests
 import config
 
-
 def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> str:
     payload = {
         "model": config.OLLAMA_MODEL,
@@ -16,7 +15,26 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> st
 
     response = requests.post(f"{config.OLLAMA_URL}/api/generate", json=payload, timeout=180)
     response.raise_for_status()
-    return response.json()["response"]
+    data = response.json()
+
+    # Ollama returns durations in nanoseconds (1 second = 1e9 nanoseconds)
+    eval_count = data.get("eval_count", 0)
+    eval_duration_sec = data.get("eval_duration", 0) / 1e9
+
+    prompt_eval_count = data.get("prompt_eval_count", 0)
+    prompt_eval_sec = data.get("prompt_eval_duration", 0) / 1e9
+
+    total_duration_sec = data.get("total_duration", 0) / 1e9
+
+    metrics = {
+        "prompt_tokens": prompt_eval_count,
+        "generated_tokens": eval_count,
+        "generation_speed_tok_sec": round(eval_count / eval_duration_sec, 2) if eval_duration_sec > 0 else 0,
+        "prompt_speed_tok_sec": round(prompt_eval_count / prompt_eval_sec, 2) if prompt_eval_sec > 0 else 0,
+        "llm_total_sec": round(total_duration_sec, 2),
+    }
+
+    return data["response"], metrics
 
 
 ENTITY_SYSTEM = """Extract the key medical entities (diseases, symptoms, drugs,
