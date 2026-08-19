@@ -23,7 +23,7 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    # If you have an NVIDIA GPU + nvidia-container-toolkit installed, uncomment:
+    # Uncomment if using GPU:
     # deploy:
     #   resources:
     #     reservations:
@@ -39,15 +39,15 @@ services:
       - neo4j
       - ollama
     volumes:
-      - ./pdfs:/app/pdfs
-      - ./src:/app/src
+      - .:/app                         # Mount whole root directory so CSV/JSON evaluation files persist
+      - huggingface_cache:/root/.cache  # Cache HuggingFace models so they don't re-download
     env_file:
       - .env
     stdin_open: true
     tty: true
-    # Container stays alive; run scripts manually via `docker compose exec app ...`
     command: ["tail", "-f", "/dev/null"]
 
 volumes:
   neo4j_data:
   ollama_data:
+  huggingface_cache:                   # Added persistent volume for evaluation models
