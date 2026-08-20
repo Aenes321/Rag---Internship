@@ -8,18 +8,71 @@ from ner import extract_triples, get_nlp
 import re
 
 
+def fix_pdf_ligatures(text: str) -> str:
+    """
+    Fixes words split by PDF font ligature/spacing artifacts (e.g. 'signifi cant',
+    'diff erences', 'modifi ed', 'Th e', 'eff ect').
+    """
+    # 1. Fix "Th " kerning splits at word start (e.g., "Th e" -> "The", "Th is" -> "This", "Th ese" -> "These")
+    text = re.sub(
+        r"\b(Th|th)\s+(e|is|ese|ose|ere|us|ree|ird|rough|roughout)\b",
+        r"\1\2",
+        text,
+    )
+
+    # 2. Fix "ff" / "ffi" / "ffe" splits where prefix is a known non-word artifact
+    # (e.g., "eff ect" -> "effect", "aff ect" -> "affect", "diff erence" -> "difference")
+    text = re.sub(
+        r"\b(eff|aff|diff|suff|offi)\s+([a-z]+)\b",
+        r"\1\2",
+        text,
+    )
+
+    # 3. Fix words split around "fi" or "fl" ligatures
+    # (e.g., "signifi cant" -> "significant", "modifi ed" -> "modified", "speci fic" -> "specific")
+    split_prefix_pattern = re.compile(
+        r"\b("
+        r"signifi|modifi|speci|classi|identi|bene|satis|quali|quanti|veri|clari|simpli|"
+        r"ampli|recti|notifi|signi|personi|intensi|digni|heavi|easi|beauti|glori|terri|horri"
+        r")\s+([a-z]+)\b",
+        re.IGNORECASE,
+    )
+    text = split_prefix_pattern.sub(r"\1\2", text)
+
+    # 4. Fix 3-part split ligatures (e.g., "signi fi cant" -> "significant", "bene fi cial" -> "beneficial")
+    three_part_pattern = re.compile(
+        r"\b(signi|bene|de|in|con|per|satis|identi|modi|speci|classi|clari|quali|quanti)\s+(fi|fl|ff)\s+([a-z]+)\b",
+        re.IGNORECASE,
+    )
+    text = three_part_pattern.sub(r"\1\2\3", text)
+
+    # 5. Targeted replacements for other common PDF split words
+    common_splits = [
+        (r"\bde\s+ficit(s?)\b", r"deficit\1"),
+        (r"\bin\s+fluence(s?)\b", r"influence\1"),
+        (r"\bin\s+flammation\b", r"inflammation"),
+        (r"\bper\s+form(ed|ance|s|ing)?\b", r"perform\1"),
+        (r"\bcon\s+fidence\b", r"confidence"),
+        (r"\bcon\s+firm(ed|ation|s)?\b", r"confirm\1"),
+        (r"\bman\s+ifest(ed|ation|s)?\b", r"manifest\1"),
+        (r"\bsigni\s+ficant(ly)?\b", r"significant\1"),
+        (r"\bdi\s+fficult(y|ies)?\b", r"difficult\1"),
+        (r"\bpre\s+ference(s?)\b", r"preference\1"),
+        (r"\bre\s+ference(s?)\b", r"reference\1"),
+        (r"\bspeci\s+fic(ally|ation)?\b", r"specific\1"),
+        (r"\baf\s+fected\b", r"affected"),
+        (r"\bef\s+fect(ive|s)?\b", r"effect\1"),
+    ]
+    for pattern, replacement in common_splits:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+
+    return text
+
+
 def remove_inline_citations_safely(text: str) -> str:
     """
     Remove citation markers glued directly to a word (superscript-style,
-    no space before) while leaving real numbers, decimals, and p-values
-    (which are always preceded by a space or a digit) untouched.
- 
-    Handles: "neoplasia3" -> "neoplasia"
-             "trauma,4"   -> "trauma,"      (keeps punctuation)
-             "philosophers.6–8" -> "philosophers."   (ranges)
-             "hemiplegia.9 10"  -> "hemiplegia."      (space-separated lists)
-             "0.05" / "p<0.05"  -> untouched          (preceded by a digit)
-             "16 patients"      -> untouched          (preceded by a space)
+    no space before) while leaving real numbers, decimals, and p-values untouched.
     """
     # [1], [1-3], [1, 2], [1, 3, 5]
     text = re.sub(
@@ -28,19 +81,8 @@ def remove_inline_citations_safely(text: str) -> str:
         "",
         text,
     )
- 
+
     # Superscript-style citation clusters glued directly to the end of a word
-    # (letter or '%'), with no space in between. The lookbehind requires the
-    # character right before the optional punctuation to be a LETTER, not a
-    # digit -- that's what protects "0.05" (preceded by '0') while still
-    # catching "trauma,4" (preceded by 'a'). Because it never depends on
-    # what follows, it also catches citations before lowercase continuation
-    # words, which the capital-letter-lookahead version was missing.
-    # Each digit group in the cluster also requires a negative lookahead for
-    # a following letter -- otherwise a trailing marker like "Malhotra1" and
-    # an unrelated leading marker like "1Centre" (affiliation superscript on
-    # the next line) get merged into one cluster and swallow the space
-    # between them.
     text = re.sub(
         r"(?<=[A-Za-z%\)])"        # glued to a word ending in a letter, % or )
         r"(?P<lead>[.,;]?)"        # optional punctuation -- kept in output
@@ -49,20 +91,17 @@ def remove_inline_citations_safely(text: str) -> str:
         lambda m: m.group("lead"),
         text,
     )
- 
-    # Leading affiliation-style markers glued to the FRONT of a capitalized
-    # word with a space before them, e.g. " 1Centre for..." -> " Centre for...".
-    # Restricted to a preceding whitespace/start-of-string so it can't eat a
-    # digit that's part of a real word.
+
+    # Leading affiliation-style markers
     text = re.sub(r"(?<=\s)\d{1,2}(?=[A-Z][a-z])", "", text)
     text = re.sub(r"^\d{1,2}(?=[A-Z][a-z])", "", text)
- 
+
     return text
- 
- 
+
+
 def load_pdf_text(path: str) -> str:
     doc = fitz.open(path)
- 
+
     junk_patterns = [
         re.compile(
             r"by guest|Downloaded from|practneurol|Protected by copyright",
@@ -82,27 +121,20 @@ def load_pdf_text(path: str) -> str:
         ),
         re.compile(r"Li\s+K.*Pract\s+Neurol", re.IGNORECASE),
         re.compile(r"doi:\s*10\.\d{4,9}/", re.IGNORECASE),
-        # Split into smaller fragments too: this sidebar box gets broken into
-        # separate blocks by the embedded QR-code image, so matching only the
-        # full phrase let fragments like "free content" slip through.
         re.compile(r"Open\s+Access", re.IGNORECASE),
         re.compile(r"Scan\s+to\s+access\s+more", re.IGNORECASE),
         re.compile(r"^\s*free\s+content\s*$", re.IGNORECASE),
     ]
- 
+
     figure_pattern = re.compile(
         r"^(Figure \d+|Table \d+|Box \d+|The patient tends to omit)",
         re.IGNORECASE,
     )
     box_bullet_pattern = re.compile(r"^[▸–]\s")
- 
+
     body_blocks = []
-    figure_blocks = []  # kept separate so they never interrupt a sentence
-                         # that's split across a column/page boundary
-                         # (a figure box sits at a fixed point on the page,
-                         # not at the point a reader would encounter it in
-                         # the text's actual reading order)
- 
+    figure_blocks = []
+
     for page_idx, page in enumerate(doc):
         rect = page.rect
         crop_box = fitz.Rect(
@@ -111,34 +143,29 @@ def load_pdf_text(path: str) -> str:
             rect.x1 - 30,
             rect.y1 - 45,
         )
- 
+
         raw_blocks = page.get_text("blocks", clip=crop_box)
         valid_page_blocks = []
- 
+
         for b in raw_blocks:
             x0, y0, x1, y1, text, block_no, block_type = b
             if block_type != 0:
                 continue
- 
+
             cleaned_block_text = unicodedata.normalize("NFKC", text).strip()
             if any(p.search(cleaned_block_text) for p in junk_patterns):
                 continue
- 
+
             # Strip soft hyphens / zero-width artifacts before line processing
             cleaned_block_text = re.sub(
                 r'[\u200b\u200c\u200d\u200e\u200f\uFEFF\u00ad\x07]', '', cleaned_block_text
             )
- 
-            # De-hyphenate line-wraps HERE, while the block still has its
-            # original newlines -- doing this after lines are joined with
-            # spaces (as in the previous version) meant the safe \n-anchored
-            # pattern never fired, and only a much riskier space-anchored
-            # fallback ran, which could wrongly merge things like
-            # "pre- and post-test" into "preand post-test".
+
+            # De-hyphenate line-wraps
             cleaned_block_text = re.sub(
                 r"(\w)-\n\s*(\w)", r"\1\2", cleaned_block_text
             )
- 
+
             clean_lines = []
             for line in cleaned_block_text.splitlines():
                 line_str = line.strip()
@@ -147,41 +174,40 @@ def load_pdf_text(path: str) -> str:
                 if any(p.search(line_str) for p in junk_patterns):
                     continue
                 clean_lines.append(line_str)
- 
+
             if not clean_lines:
                 continue
- 
+
             block_text = " ".join(clean_lines)
- 
             valid_page_blocks.append((x0, y0, x1, y1, block_text))
- 
+
         midpoint_x = rect.width / 2.0
         col1 = [b for b in valid_page_blocks if b[0] < midpoint_x]
         col2 = [b for b in valid_page_blocks if b[0] >= midpoint_x]
- 
+
         col1.sort(key=lambda item: item[1])
         col2.sort(key=lambda item: item[1])
- 
+
         for b in col1 + col2:
             block_text = b[4]
             if figure_pattern.match(block_text) or box_bullet_pattern.match(block_text):
                 figure_blocks.append(block_text)
             else:
                 body_blocks.append(block_text)
- 
+
     full_text = "\n\n".join(body_blocks)
- 
+
     ref_idx = full_text.find("REFERENCES")
     if ref_idx != -1:
         full_text = full_text[:ref_idx]
- 
-    # Any hyphen-space wraps left over from justified text (rare, once
-    # de-hyphenation runs at the block stage above) -- kept narrow to actual
-    # line-wrap remnants, not a blanket "letter-space-letter" merge.
+
     full_text = re.sub(r"(\w)-\n\s*(\w)", r"\1\2", full_text)
- 
+
+    # Recombine words split by PDF font ligature/kerning artifacts
+    full_text = fix_pdf_ligatures(full_text)
+
     full_text = remove_inline_citations_safely(full_text)
- 
+
     stitched_paragraphs = []
     current_p = ""
     for block in full_text.split("\n\n"):
@@ -203,128 +229,41 @@ def load_pdf_text(path: str) -> str:
                 and not re.search(r"[\.\?\!:]\s*$", current_p)
             )
             starts_with_lowercase = bool(re.match(r"^[a-z]", block))
- 
+
             if ends_with_connector or is_mid_sentence or starts_with_lowercase:
                 current_p += " " + block
             else:
                 stitched_paragraphs.append(current_p)
                 current_p = block
- 
+
     if current_p:
         stitched_paragraphs.append(current_p)
- 
+
     final_output = "\n\n".join(stitched_paragraphs)
     final_output = re.sub(r"[ \t]+", " ", final_output)
     final_output = re.sub(r"\n{3,}", "\n\n", final_output).strip()
- 
+
     if figure_blocks:
-        # Merge bullet-fragment blocks (e.g. Box 1's "▸ Core deficit" lines)
-        # back onto the preceding Figure/Table/Box heading so each entry
-        # reads as one unit instead of scattered one-line fragments.
         merged_figures = []
         for fb in figure_blocks:
             if box_bullet_pattern.match(fb) and merged_figures:
                 merged_figures[-1] += " " + fb
             else:
                 merged_figures.append(fb)
- 
+
         figures_section = "\n\n".join(merged_figures)
         figures_section = re.sub(r"[ \t]+", " ", figures_section)
-        # citation numbers appear in figure captions too (e.g. "test.27")
+        
+        # Apply ligature fix to figure section as well
+        figures_section = fix_pdf_ligatures(figures_section)
         figures_section = remove_inline_citations_safely(figures_section)
+        
         final_output += "\n\n--- Figures, Tables, and Boxes ---\n\n" + figures_section
- 
+
     with open("pdf_to_text.txt", "w", encoding="utf-8") as f:
         f.write(final_output)
- 
+
     return final_output
-
-
-"""def load_pdf_text(path: str) -> str:
-    doc = fitz.open(path)
- 
-    page_texts = []
-    for page in doc:
-        page_h = page.rect.height
- 
-        # Header/footer band cutoffs, as a fraction of page height rather than
-        # hardcoded points — generalizes across different page sizes.
-        header_cutoff = page_h * 0.06   # top ~6% of page
-        footer_cutoff = page_h * 0.955  # bottom ~4.5% of page
- 
-        kept_blocks = []
-        for b in page.get_text("blocks"):
-            x0, y0, x1, y1, block_text = b[0], b[1], b[2], b[3], b[4]
-            block_text = block_text.strip()
-            if not block_text:
-                continue
-            if y1 < header_cutoff:
-                continue  # running header (e.g. "REVIEW")
-            if y0 > footer_cutoff:
-                continue  # running footer (page number, doi, journal name)
-            # narrow tall block hugging the right margin = rotated watermark strip
-            if x0 > page.rect.width * 0.93 and (x1 - x0) < 40:
-                continue
-            kept_blocks.append(block_text)
- 
-        page_texts.append("\n".join(kept_blocks))
- 
-    doc.close()
-    text = "\n".join(page_texts)
- 
-    # Belt-and-braces: strip the recurring boilerplate phrase by content too,
-    # in case a PDF's geometry doesn't match the band cutoffs above.
-    text = re.sub(
-        r"Protected by copyright,?\s*including for uses related to text and data mining,?\s*"
-        r"AI training,?\s*and similar technologies\.?\s*",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\.?\s*by guest on [A-Za-z0-9,\s]+?http\S+\s*Downloaded from\s*",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\d{1,2}\s+\w+\s+\d{4}\.\s*10\.\d{4}/\S+\s*on\s*.+?first published as\s*",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
- 
-    # 1. Normalize Unicode characters (canonical decomposition/recomposition)
-    text = unicodedata.normalize("NFKC", text)
- 
-    # 2. Strip soft hyphens explicitly
-    text = re.sub(r"\xad\s*", "", text)
-    # Strip hidden Unicode artifacts: Zero-Width Space, soft hyphens, etc.
-    text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\uFEFF\u00ad\u00a0\x07]', ' ', text)
- 
-    # Hard hyphen at a line-wrap: "hyphen-\nated" -> "hyphenated"
-    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
- 
-    # Remaining newlines are just line wraps, not paragraph breaks — join with a space
-    text = re.sub(r"\s*\n\s*", " ", text)
-    text = re.sub(r"[ \t]{2,}", " ", text)
- 
-    # 3. Fix citation superscript numbers glued directly to adjacent words,
-    # e.g. "neoplasia3 and" -> "neoplasia [3] and", "1Centre" -> "[1] Centre",
-    # "Stroke2009" -> "Stroke 2009"
-    text = re.sub(r'([a-zA-Z\.\,])(\d{1,3})(\s+[A-Za-z])', r'\1 [\2]\3', text)
-    text = re.sub(r'(?<![\w])(\d{1,2})([A-Z][a-z]{2,})', r'[\1] \2', text)
-    text = re.sub(r'([a-zA-Z])(\d{4};)', r'\1 \2', text)
- 
-    # 4. Strip the references section: cut everything from the "REFERENCES"
-    # heading to the end of the document.
-    text = re.split(r"\bREFERENCES\b\s*(?=\[?\d+\]?\s+[A-Z])", text, maxsplit=1)[0].strip()
- 
-    with open("pdf_to_text.txt", "w", encoding="utf-8") as f:
-        f.write(text)
- 
-    return text"""
-
 
 def chunk_text(text: str, chunk_size: int, overlap_sentences: int = 1):
     nlp = get_nlp()

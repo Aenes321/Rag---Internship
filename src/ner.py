@@ -183,11 +183,6 @@ def extract_entities(text: str):
     seen = set()
     result = []
 
-    for num in DIGIT_PATTERN.findall(text):
-        if num not in seen:
-            seen.add(num)
-            result.append(num)
-
     citations = extract_citations(text)
     for cite in citations:
         if cite not in seen and cite not in STOP_ENTITIES and cite not in PRONOUNS:
