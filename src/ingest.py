@@ -10,94 +10,107 @@ import re
 
 def fix_pdf_ligatures(text: str) -> str:
     """
-    Fixes words split by PDF font ligature/spacing artifacts (e.g. 'signifi cant',
-    'diff erences', 'modifi ed', 'Th e', 'eff ect').
+    Systematically removes false spaces created by PDF font ligatures (fi, ff, fl, ffi, ffl)
+    and kerning artifacts (Th).
     """
-    # 1. Fix "Th " kerning splits at word start (e.g., "Th e" -> "The", "Th is" -> "This", "Th ese" -> "These")
+    # "Th " kerning splits at word start (e.g., "Th e" -> "The", "Th is" -> "This")
+    th_words = r"(e|is|ese|ose|ere|us|ree|ird|rough|roughout|en|an)"
+    text = re.sub(r"\bTh\s+" + th_words + r"\b", r"Th\1", text)
+    text = re.sub(r"\bth\s+" + th_words + r"\b", r"th\1", text)
+
+    # Universal fix for words ending in 'fl', 'ffi', 'ffl' followed by space + lowercase
+    # (e.g. "infl uences" -> "influences", "diffi culties" -> "difficulties", "fl uid" -> "fluid")
     text = re.sub(
-        r"\b(Th|th)\s+(e|is|ese|ose|ere|us|ree|ird|rough|roughout)\b",
+        r"\b([A-Za-z]*(?:fl|ffi|ffl))\s+([a-z]+)\b",
         r"\1\2",
-        text,
+        text
     )
 
-    # 2. Fix "ff" / "ffi" / "ffe" splits where prefix is a known non-word artifact
-    # (e.g., "eff ect" -> "effect", "aff ect" -> "affect", "diff erence" -> "difference")
+    # Universal fix for words ending in or starting with 'fi' followed by space + lowercase
+    # (e.g. "fi ve" -> "five", "fi nd" -> "find", "fi gure" -> "figure", "benefi cial" -> "beneficial")
+    def fix_fi_match(m):
+        prefix, suffix = m.group(1), m.group(2)
+        if prefix.lower() in ("sci", "hi", "wi") and suffix.lower() in ("movie", "system", "sound", "set"):
+            return m.group(0)
+        return prefix + suffix
+
     text = re.sub(
-        r"\b(eff|aff|diff|suff|offi)\s+([a-z]+)\b",
-        r"\1\2",
+        r"\b([A-Za-z]*fi)\s+([a-z]+)\b",
+        fix_fi_match,
         text,
+        flags=re.IGNORECASE
     )
 
-    # 3. Fix words split around "fi" or "fl" ligatures
-    # (e.g., "signifi cant" -> "significant", "modifi ed" -> "modified", "speci fic" -> "specific")
-    split_prefix_pattern = re.compile(
-        r"\b("
-        r"signifi|modifi|speci|classi|identi|bene|satis|quali|quanti|veri|clari|simpli|"
-        r"ampli|recti|notifi|signi|personi|intensi|digni|heavi|easi|beauti|glori|terri|horri"
-        r")\s+([a-z]+)\b",
-        re.IGNORECASE,
-    )
-    text = split_prefix_pattern.sub(r"\1\2", text)
+    # Universal fix for words with 'ff' followed by space + lowercase
+    # (e.g. "eff ect" -> "effect", "diff erence" -> "difference", "aff ected" -> "affected")
+    real_ff_words = {
+        "off", "staff", "cliff", "stiff", "buff", "fluff", "cuff", "puff",
+        "sheriff", "muff", "stuff", "scuff", "sniff", "tariff", "bailiff",
+        "plaintiff", "bluff", "turnoff", "payoff", "kickoff", "cutoff"
+    }
 
-    # 4. Fix 3-part split ligatures (e.g., "signi fi cant" -> "significant", "bene fi cial" -> "beneficial")
-    three_part_pattern = re.compile(
-        r"\b(signi|bene|de|in|con|per|satis|identi|modi|speci|classi|clari|quali|quanti)\s+(fi|fl|ff)\s+([a-z]+)\b",
-        re.IGNORECASE,
-    )
-    text = three_part_pattern.sub(r"\1\2\3", text)
+    def fix_ff_match(m):
+        prefix, suffix = m.group(1), m.group(2)
+        if prefix.lower() not in real_ff_words:
+            return prefix + suffix
+        if suffix.lower() in ("ect", "ects", "ective", "erence", "erences", "erent", "icult", "iculty", "icient", "iciency", "ice", "icer"):
+            return prefix + suffix
+        return m.group(0)
 
-    # 5. Targeted replacements for other common PDF split words
-    common_splits = [
-        (r"\bde\s+ficit(s?)\b", r"deficit\1"),
-        (r"\bin\s+fluence(s?)\b", r"influence\1"),
-        (r"\bin\s+flammation\b", r"inflammation"),
-        (r"\bper\s+form(ed|ance|s|ing)?\b", r"perform\1"),
-        (r"\bcon\s+fidence\b", r"confidence"),
-        (r"\bcon\s+firm(ed|ation|s)?\b", r"confirm\1"),
-        (r"\bman\s+ifest(ed|ation|s)?\b", r"manifest\1"),
-        (r"\bsigni\s+ficant(ly)?\b", r"significant\1"),
-        (r"\bdi\s+fficult(y|ies)?\b", r"difficult\1"),
-        (r"\bpre\s+ference(s?)\b", r"preference\1"),
-        (r"\bre\s+ference(s?)\b", r"reference\1"),
-        (r"\bspeci\s+fic(ally|ation)?\b", r"specific\1"),
-        (r"\baf\s+fected\b", r"affected"),
-        (r"\bef\s+fect(ive|s)?\b", r"effect\1"),
-    ]
-    for pattern, replacement in common_splits:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b([A-Za-z]*ff)\s+([a-z]+)\b",
+        fix_ff_match,
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # Handle 3-part split ligatures (e.g. "bene fi cial" -> "beneficial", "de fi cit" -> "deficit")
+    text = re.sub(
+        r"\b([a-z]{2,})\s+(fi|fl|ff)\s+([a-z]{2,})\b",
+        r"\1\2\3",
+        text,
+        flags=re.IGNORECASE
+    )
 
     return text
 
 
 def remove_inline_citations_safely(text: str) -> str:
     """
-    Remove citation markers glued directly to a word (superscript-style,
-    no space before) while leaving real numbers, decimals, and p-values untouched.
+    Removes inline citation numbers (superscripts, bracketed [1-3], or numbers
+    following punctuation/et al. like 'space. 17 Castiello' or 'et al. 16,28 applied')
+    while strictly preserving real clinical metrics, decimals (0.05, 64.7, 25.5), age,
+    patient counts, and measurements.
     """
-    # [1], [1-3], [1, 2], [1, 3, 5]
+    # 1. Bracketed citations: [1], [1-3], [1, 2], [1, 3, 5]
     text = re.sub(
-        r"\[\s*\d+(?:\s*[-–]\s*\d+)?"
-        r"(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*\s*\]",
+        r"\[\s*\d+(?:\s*[-–,]\s*\d+)*\s*\]",
         "",
         text,
     )
 
-    # Superscript-style citation clusters glued directly to the end of a word
-    text = re.sub(
-        r"(?<=[A-Za-z%\)])"        # glued to a word ending in a letter, % or )
-        r"(?P<lead>[.,;]?)"        # optional punctuation -- kept in output
-        r"(?P<nums>\d{1,3}(?![A-Za-z])"
-        r"(?:(?:,\s*|\s+|–|-)\d{1,3}(?![A-Za-z]))*)",
-        lambda m: m.group("lead"),
-        text,
+    # 2. Citations following punctuation or 'et al.' (MUST be preceded by a LETTER, never a digit)
+    # e.g., "space. 17 Castiello", "et al. 16,28 applied", "hygiene.4,5 Previous"
+    # Requiring [a-zA-Z] before punctuation protects float decimals like "0.05" or "64.7"
+    citation_after_punct = re.compile(
+        r"(?P<prefix>[a-zA-Z][.,;])\s*"                     # Preceded by LETTER + punctuation
+        r"\d{1,3}(?:\s*[,–-]?\s*\d{1,3})*"                  # Citation number(s)
+        r"(?=\s+[A-Za-z]|\s*[.,;]|$)"                      # Followed by a word, punctuation, or EOL
     )
+    text = citation_after_punct.sub(r"\g<prefix>", text)
 
-    # Leading affiliation-style markers
-    text = re.sub(r"(?<=\s)\d{1,2}(?=[A-Z][a-z])", "", text)
-    text = re.sub(r"^\d{1,2}(?=[A-Z][a-z])", "", text)
+    # 3. Citations glued directly to the end of a word (e.g. "hemiplegia9", "paretic side11")
+    glued_citation = re.compile(
+        r"(?P<prefix>[A-Za-z%\)])"                         # Preceding letter, %, or )
+        r"(?P<lead>[.,;]?)"                                # Optional punctuation
+        r"\d{1,3}(?:\s*[,–-]?\s*\d{1,3})*"                  # Citation number sequence
+        r"(?!\s*(?:mg|g|kg|ml|cm|mm|m|hz|min|mins|sec|secs|hours|hrs|days|weeks|months|years|patients|subjects|controls|%|version|points|score|scores|group|table|figure|box)\b)"
+    )
+    text = glued_citation.sub(r"\g<prefix>\g<lead>", text)
 
+    # 4. Collapse double spaces left behind by citation removal
+    text = re.sub(r"[ \t]{2,}", " ", text)
     return text
-
 
 def load_pdf_text(path: str) -> str:
     doc = fitz.open(path)
@@ -138,7 +151,7 @@ def load_pdf_text(path: str) -> str:
     for page_idx, page in enumerate(doc):
         rect = page.rect
         crop_box = fitz.Rect(
-            rect.x0 + 42,
+            rect.x0 + 10,
             rect.y0 + (35 if page_idx > 0 else 0),
             rect.x1 - 30,
             rect.y1 - 45,
@@ -171,6 +184,9 @@ def load_pdf_text(path: str) -> str:
                 line_str = line.strip()
                 if not line_str:
                     continue
+                if re.match(r"^(REFERENCES|References)\b", line_str):
+                    # mark a synthetic boundary here so downstream trimming can find it
+                    line_str = "\n\n__REF_START__\n\n" + line_str
                 if any(p.search(line_str) for p in junk_patterns):
                     continue
                 clean_lines.append(line_str)
@@ -197,15 +213,17 @@ def load_pdf_text(path: str) -> str:
 
     full_text = "\n\n".join(body_blocks)
 
-    ref_idx = full_text.find("REFERENCES")
-    if ref_idx != -1:
-        full_text = full_text[:ref_idx]
+    # Safely trim the REFERENCES section only if it appears as a standalone header in the 2nd half of document
+    ref_match = re.search(r"__REF_START__", full_text)
+    if ref_match and ref_match.start() > len(full_text) * 0.5:
+        full_text = full_text[:ref_match.start()]
 
     full_text = re.sub(r"(\w)-\n\s*(\w)", r"\1\2", full_text)
 
     # Recombine words split by PDF font ligature/kerning artifacts
     full_text = fix_pdf_ligatures(full_text)
 
+    # Remove inline citation numbers
     full_text = remove_inline_citations_safely(full_text)
 
     stitched_paragraphs = []
@@ -239,10 +257,7 @@ def load_pdf_text(path: str) -> str:
     if current_p:
         stitched_paragraphs.append(current_p)
 
-    final_output = "\n\n".join(stitched_paragraphs)
-    final_output = re.sub(r"[ \t]+", " ", final_output)
-    final_output = re.sub(r"\n{3,}", "\n\n", final_output).strip()
-
+    # Insert figures/tables/boxes right after the paragraph that first references them
     if figure_blocks:
         merged_figures = []
         for fb in figure_blocks:
@@ -251,14 +266,38 @@ def load_pdf_text(path: str) -> str:
             else:
                 merged_figures.append(fb)
 
-        figures_section = "\n\n".join(merged_figures)
-        figures_section = re.sub(r"[ \t]+", " ", figures_section)
-        
-        # Apply ligature fix to figure section as well
-        figures_section = fix_pdf_ligatures(figures_section)
-        figures_section = remove_inline_citations_safely(figures_section)
-        
-        final_output += "\n\n--- Figures, Tables, and Boxes ---\n\n" + figures_section
+        merged_figures = [fix_pdf_ligatures(fb) for fb in merged_figures]
+        merged_figures = [remove_inline_citations_safely(fb) for fb in merged_figures]
+
+        reference_key_pattern = re.compile(r"^(Figure|Table|Box)\s+(\d+)", re.IGNORECASE)
+        figure_lookup = {}
+        for fb in merged_figures:
+            m = reference_key_pattern.match(fb)
+            if m:
+                key = (m.group(1).lower(), m.group(2))
+                figure_lookup[key] = fb
+            else:
+                figure_lookup[("_unmatched", str(len(figure_lookup)))] = fb
+
+        mention_pattern = re.compile(r"\b(figure|table|box)\s*(\d+)\b", re.IGNORECASE)
+        inserted_keys = set()
+        final_paragraphs = []
+
+        for para in stitched_paragraphs:
+            final_paragraphs.append(para)
+            for m in mention_pattern.finditer(para):
+                key = (m.group(1).lower(), m.group(2))
+                if key in figure_lookup and key not in inserted_keys:
+                    final_paragraphs.append(figure_lookup[key])
+                    inserted_keys.add(key)
+
+        leftover = [fb for key, fb in figure_lookup.items() if key not in inserted_keys]
+        final_paragraphs.extend(leftover)
+        stitched_paragraphs = final_paragraphs
+
+    final_output = "\n\n".join(stitched_paragraphs)
+    final_output = re.sub(r"[ \t]+", " ", final_output)
+    final_output = re.sub(r"\n{3,}", "\n\n", final_output).strip()
 
     with open("pdf_to_text.txt", "w", encoding="utf-8") as f:
         f.write(final_output)
