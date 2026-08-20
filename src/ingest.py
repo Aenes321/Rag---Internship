@@ -7,27 +7,23 @@ from graph_db import GraphDB
 from ner import extract_triples, get_nlp
 import re
 
-
 def fix_pdf_ligatures(text: str) -> str:
     """
     Systematically removes false spaces created by PDF font ligatures (fi, ff, fl, ffi, ffl)
     and kerning artifacts (Th).
     """
-    # "Th " kerning splits at word start (e.g., "Th e" -> "The", "Th is" -> "This")
     th_words = r"(e|is|ese|ose|ere|us|ree|ird|rough|roughout|en|an)"
     text = re.sub(r"\bTh\s+" + th_words + r"\b", r"Th\1", text)
     text = re.sub(r"\bth\s+" + th_words + r"\b", r"th\1", text)
 
     # Universal fix for words ending in 'fl', 'ffi', 'ffl' followed by space + lowercase
-    # (e.g. "infl uences" -> "influences", "diffi culties" -> "difficulties", "fl uid" -> "fluid")
     text = re.sub(
         r"\b([A-Za-z]*(?:fl|ffi|ffl))\s+([a-z]+)\b",
         r"\1\2",
-        text
+        text,
     )
 
     # Universal fix for words ending in or starting with 'fi' followed by space + lowercase
-    # (e.g. "fi ve" -> "five", "fi nd" -> "find", "fi gure" -> "figure", "benefi cial" -> "beneficial")
     def fix_fi_match(m):
         prefix, suffix = m.group(1), m.group(2)
         if prefix.lower() in ("sci", "hi", "wi") and suffix.lower() in ("movie", "system", "sound", "set"):
@@ -38,11 +34,10 @@ def fix_pdf_ligatures(text: str) -> str:
         r"\b([A-Za-z]*fi)\s+([a-z]+)\b",
         fix_fi_match,
         text,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
 
     # Universal fix for words with 'ff' followed by space + lowercase
-    # (e.g. "eff ect" -> "effect", "diff erence" -> "difference", "aff ected" -> "affected")
     real_ff_words = {
         "off", "staff", "cliff", "stiff", "buff", "fluff", "cuff", "puff",
         "sheriff", "muff", "stuff", "scuff", "sniff", "tariff", "bailiff",
@@ -61,15 +56,15 @@ def fix_pdf_ligatures(text: str) -> str:
         r"\b([A-Za-z]*ff)\s+([a-z]+)\b",
         fix_ff_match,
         text,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
 
-    # Handle 3-part split ligatures (e.g. "bene fi cial" -> "beneficial", "de fi cit" -> "deficit")
+    # Handle 3-part split ligatures (e.g. "bene fi cial" -> "beneficial")
     text = re.sub(
         r"\b([a-z]{2,})\s+(fi|fl|ff)\s+([a-z]{2,})\b",
         r"\1\2\3",
         text,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
 
     return text
@@ -78,37 +73,40 @@ def fix_pdf_ligatures(text: str) -> str:
 def remove_inline_citations_safely(text: str) -> str:
     """
     Removes inline citation numbers (superscripts, bracketed [1-3], or numbers
-    following punctuation/et al. like 'space. 17 Castiello' or 'et al. 16,28 applied')
-    while strictly preserving real clinical metrics, decimals (0.05, 64.7, 25.5), age,
-    patient counts, and measurements.
+    following period + Capital word or 'et al.') while strictly preserving real
+    clinical metrics, counts (375, 26, 5, 7, 14), decimals (0.05, 64.7), years (2022),
+    and measurements.
     """
     # 1. Bracketed citations: [1], [1-3], [1, 2], [1, 3, 5]
+    text = re.sub(r"\[\s*\d+(?:\s*[-–,]\s*\d+)*\s*\]", "", text)
+
+    # 2. Citations following 'et al.' (e.g., "Glover et al. 16,28 applied")
     text = re.sub(
-        r"\[\s*\d+(?:\s*[-–,]\s*\d+)*\s*\]",
+        r"(?<=et al\.)\s*\d{1,3}(?:\s*[,–-]\s*\d{1,3})*(?=\s+[A-Za-z]|\s*[.,;]|$)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 3. Citations following sentence-ending period before a CAPITALIZED word
+    # e.g., "space. 17 Castiello", "hygiene. 4,5 Previous", "ganglia. 1-3 Patients"
+    # Followed by space + Capitalized word (A-Z) so numbers before lowercase words ("Class I, 7 as") are protected.
+    text = re.sub(
+        r"(?<=[a-zA-Z]\.)\s*\d{1,3}(?:\s*[,–-]\s*\d{1,3})*(?=\s+[A-Z][a-z])",
         "",
         text,
     )
 
-    # 2. Citations following punctuation or 'et al.' (MUST be preceded by a LETTER, never a digit)
-    # e.g., "space. 17 Castiello", "et al. 16,28 applied", "hygiene.4,5 Previous"
-    # Requiring [a-zA-Z] before punctuation protects float decimals like "0.05" or "64.7"
-    citation_after_punct = re.compile(
-        r"(?P<prefix>[a-zA-Z][.,;])\s*"                     # Preceded by LETTER + punctuation
-        r"\d{1,3}(?:\s*[,–-]?\s*\d{1,3})*"                  # Citation number(s)
-        r"(?=\s+[A-Za-z]|\s*[.,;]|$)"                      # Followed by a word, punctuation, or EOL
-    )
-    text = citation_after_punct.sub(r"\g<prefix>", text)
-
-    # 3. Citations glued directly to the end of a word (e.g. "hemiplegia9", "paretic side11")
+    # 4. Citations glued directly to the end of a word (e.g. "hemiplegia9", "paretic side11")
     glued_citation = re.compile(
-        r"(?P<prefix>[A-Za-z%\)])"                         # Preceding letter, %, or )
-        r"(?P<lead>[.,;]?)"                                # Optional punctuation
-        r"\d{1,3}(?:\s*[,–-]?\s*\d{1,3})*"                  # Citation number sequence
+        r"(?P<prefix>[A-Za-z%\)])"
+        r"(?P<lead>[.,;]?)"
+        r"\d{1,3}(?:\s*[,–-]\s*\d{1,3})*"
         r"(?!\s*(?:mg|g|kg|ml|cm|mm|m|hz|min|mins|sec|secs|hours|hrs|days|weeks|months|years|patients|subjects|controls|%|version|points|score|scores|group|table|figure|box)\b)"
     )
     text = glued_citation.sub(r"\g<prefix>\g<lead>", text)
 
-    # 4. Collapse double spaces left behind by citation removal
+    # 5. Collapse double spaces left behind
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text
 
@@ -116,22 +114,13 @@ def load_pdf_text(path: str) -> str:
     doc = fitz.open(path)
 
     junk_patterns = [
-        re.compile(
-            r"by guest|Downloaded from|practneurol|Protected by copyright",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"first published as|http:\/\/pn\.bmj\.com|Pract Neurol",
-            re.IGNORECASE,
-        ),
+        re.compile(r"by guest|Downloaded from|practneurol|Protected by copyright", re.IGNORECASE),
+        re.compile(r"first published as|http:\/\/pn\.bmj\.com|Pract Neurol", re.IGNORECASE),
         re.compile(r"^\s*To cite\s*:.*", re.IGNORECASE),
         re.compile(r"^\s*Correspondence to\b.*", re.IGNORECASE),
         re.compile(r"^\s*(Accepted|Published Online First)\b.*", re.IGNORECASE),
         re.compile(r"^\s*REVIEW\s*$|^\s*\d{1,4}\s*$", re.IGNORECASE),
-        re.compile(
-            r"^(Centre for Restorative Neuroscience|Department of Neurology|Division of Brain Sciences)",
-            re.IGNORECASE,
-        ),
+        re.compile(r"^(Centre for Restorative Neuroscience|Department of Neurology|Division of Brain Sciences)", re.IGNORECASE),
         re.compile(r"Li\s+K.*Pract\s+Neurol", re.IGNORECASE),
         re.compile(r"doi:\s*10\.\d{4,9}/", re.IGNORECASE),
         re.compile(r"Open\s+Access", re.IGNORECASE),
@@ -139,10 +128,7 @@ def load_pdf_text(path: str) -> str:
         re.compile(r"^\s*free\s+content\s*$", re.IGNORECASE),
     ]
 
-    figure_pattern = re.compile(
-        r"^(Figure \d+|Table \d+|Box \d+|The patient tends to omit)",
-        re.IGNORECASE,
-    )
+    figure_pattern = re.compile(r"^(Figure \d+|Table \d+|Box \d+|The patient tends to omit)", re.IGNORECASE)
     box_bullet_pattern = re.compile(r"^[▸–]\s")
 
     body_blocks = []
@@ -169,26 +155,16 @@ def load_pdf_text(path: str) -> str:
             if any(p.search(cleaned_block_text) for p in junk_patterns):
                 continue
 
-            # Strip soft hyphens / zero-width artifacts before line processing
-            cleaned_block_text = re.sub(
-                r'[\u200b\u200c\u200d\u200e\u200f\uFEFF\u00ad\x07]', '', cleaned_block_text
-            )
-
-            # De-hyphenate line-wraps
-            cleaned_block_text = re.sub(
-                r"(\w)-\n\s*(\w)", r"\1\2", cleaned_block_text
-            )
+            cleaned_block_text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\uFEFF\u00ad\x07]', '', cleaned_block_text)
+            cleaned_block_text = re.sub(r"(\w)-\n\s*(\w)", r"\1\2", cleaned_block_text)
 
             clean_lines = []
             for line in cleaned_block_text.splitlines():
                 line_str = line.strip()
-                if not line_str:
+                if not line_str or any(p.search(line_str) for p in junk_patterns):
                     continue
                 if re.match(r"^(REFERENCES|References)\b", line_str):
-                    # mark a synthetic boundary here so downstream trimming can find it
                     line_str = "\n\n__REF_START__\n\n" + line_str
-                if any(p.search(line_str) for p in junk_patterns):
-                    continue
                 clean_lines.append(line_str)
 
             if not clean_lines:
@@ -213,17 +189,12 @@ def load_pdf_text(path: str) -> str:
 
     full_text = "\n\n".join(body_blocks)
 
-    # Safely trim the REFERENCES section only if it appears as a standalone header in the 2nd half of document
     ref_match = re.search(r"__REF_START__", full_text)
     if ref_match and ref_match.start() > len(full_text) * 0.5:
         full_text = full_text[:ref_match.start()]
 
     full_text = re.sub(r"(\w)-\n\s*(\w)", r"\1\2", full_text)
-
-    # Recombine words split by PDF font ligature/kerning artifacts
     full_text = fix_pdf_ligatures(full_text)
-
-    # Remove inline citation numbers
     full_text = remove_inline_citations_safely(full_text)
 
     stitched_paragraphs = []
@@ -235,17 +206,8 @@ def load_pdf_text(path: str) -> str:
         if not current_p:
             current_p = block
         else:
-            ends_with_connector = bool(
-                re.search(
-                    r"\b(and|or|the|to|of|in|that|with|as|for|by|from|because|more|less)\s*$",
-                    current_p,
-                    re.IGNORECASE,
-                )
-            )
-            is_mid_sentence = bool(
-                re.search(r"[a-z0-9,]\s*$", current_p)
-                and not re.search(r"[\.\?\!:]\s*$", current_p)
-            )
+            ends_with_connector = bool(re.search(r"\b(and|or|the|to|of|in|that|with|as|for|by|from|because|more|less)\s*$", current_p, re.IGNORECASE))
+            is_mid_sentence = bool(re.search(r"[a-z0-9,]\s*$", current_p) and not re.search(r"[\.\?\!:]\s*$", current_p))
             starts_with_lowercase = bool(re.match(r"^[a-z]", block))
 
             if ends_with_connector or is_mid_sentence or starts_with_lowercase:
@@ -257,7 +219,6 @@ def load_pdf_text(path: str) -> str:
     if current_p:
         stitched_paragraphs.append(current_p)
 
-    # Insert figures/tables/boxes right after the paragraph that first references them
     if figure_blocks:
         merged_figures = []
         for fb in figure_blocks:
@@ -306,7 +267,6 @@ def load_pdf_text(path: str) -> str:
 
 def chunk_text(text: str, chunk_size: int, overlap_sentences: int = 1):
     nlp = get_nlp()
-    # Disable heavy NER during sentence segmentation for speed and memory safety
     disable_pipes = [p for p in ["ner", "entity_ruler"] if p in nlp.pipe_names]
     with nlp.select_pipes(disable=disable_pipes):
         doc = nlp(text)
@@ -324,7 +284,6 @@ def chunk_text(text: str, chunk_size: int, overlap_sentences: int = 1):
         chunks.append(" ".join(current))
     return chunks
 
-# Define canonical mappings for domain-specific concepts
 CANONICAL_ENTITIES = {
     "vr": "virtual reality",
     "rct": "randomized controlled trial",
@@ -333,11 +292,8 @@ CANONICAL_ENTITIES = {
 
 def normalize(name: str) -> str:
     norm = " ".join(name.strip().lower().split())
-    
-    # 2. Map directly to canonical node if a variant exists
     if norm in CANONICAL_ENTITIES:
         return CANONICAL_ENTITIES[norm]
-
     return norm
 
 
