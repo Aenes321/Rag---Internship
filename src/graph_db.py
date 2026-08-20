@@ -55,14 +55,42 @@ class GraphDB:
         with self.driver.session() as session:
             session.run(query, subject=subject, object=obj, chunk_id=chunk_id,
                         chunk_text=chunk_text, source_file=source_file)
+    
+    def write_chunk_entities(self, chunk_id: str, chunk_text: str, source_file: str, entities: list):
+        query = """
+        MERGE (c:Chunk {id: $chunk_id})
+        ON CREATE SET c.text = $chunk_text, c.source_file = $source_file
+        WITH c
+        UNWIND $entities AS ent_name
+        MERGE (e:Entity {name: ent_name})
+        MERGE (e)-[:MENTIONED_IN]->(c)
+        """
+        with self.driver.session() as session:
+            session.run(query, chunk_id=chunk_id, chunk_text=chunk_text, source_file=source_file, entities=entities)
+        
+    def get_chunks_for_entities(self, entity_names: list, limit: int = 15):
+        query = """
+        MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk)
+        WHERE e.name IN $entity_names
+        RETURN DISTINCT c.text AS source_text, count(e) AS match_count
+        ORDER BY match_count DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            result = session.run(query, entity_names=entity_names, limit=limit)
+            return [r["source_text"] for r in result]
 
     def search_entities(self, query_text: str, limit: int = 5):
         escaped = _escape_lucene(query_text)
         words = [w for w in escaped.split() if w]
         if not words:
             return []
-        # Tokenize words for Lucene multi-word prefix search
-        safe_query = " AND ".join([f"{w}*" for w in words])
+        
+        # Try exact phrase search first, then token prefixes
+        phrase_query = f'"{escaped}"'
+        prefix_query = " AND ".join([f"{w}*" for w in words])
+        combined_query = f"{phrase_query}^2 OR ({prefix_query})"
+
         cypher = """
         CALL db.index.fulltext.queryNodes('entityIndex', $query_text) YIELD node, score
         RETURN node.name AS name, score
@@ -70,7 +98,7 @@ class GraphDB:
         LIMIT $limit
         """
         with self.driver.session() as session:
-            result = session.run(cypher, query_text=safe_query, limit=limit)
+            result = session.run(cypher, query_text=combined_query, limit=limit)
             return [record["name"] for record in result]
 
     def traverse(self, entity_names, hops: int = 2, limit: int = 25):

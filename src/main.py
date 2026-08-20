@@ -2,14 +2,28 @@ from graph_db import GraphDB
 from ner import extract_entities         # fast local extraction, no LLM calls
 from llm import generate_answer          # LLM still used for final answer synthesis
 import time
+import re
 
 def normalize(name: str) -> str:
     return " ".join(name.strip().lower().split())
 
-def score_snippet(text: str, entities: list) -> int:
-    """Count total term occurrences to score snippet relevance."""
+def score_snippet(text: str, query: str, entities: list) -> int:
     text_lower = text.lower()
-    return sum(text_lower.count(e) for e in entities if len(e) > 2)
+    score = 0.0
+    
+    # Reward compound entity matches heavily
+    for e in entities:
+        if len(e.split()) > 1 and e in text_lower:
+            score += 5.0
+        elif e in text_lower:
+            score += 1.0
+
+    # Reward chunks containing numerical or monetary figures relevant to quantitative questions
+    if any(char.isdigit() for char in query):
+        digits_in_snippet = len(re.findall(r'\b\d+(?:\.\d+)?\b', text))
+        score += min(digits_in_snippet * 0.5, 3.0)
+
+    return score
 
 def answer_question(db: GraphDB, question: str) -> str:
     start_total_time = time.perf_counter()
@@ -17,6 +31,7 @@ def answer_question(db: GraphDB, question: str) -> str:
     t0 = time.perf_counter()
     entities = extract_entities(question)
     entities = [normalize(e) for e in entities if e.strip()]
+    entities = sorted(entities, key=lambda e: len(e.split()), reverse=True)
     ner_time = time.perf_counter() - t0
     print(f"  [entities extracted ({ner_time:.2f}s): {entities}]")
 
@@ -26,33 +41,30 @@ def answer_question(db: GraphDB, question: str) -> str:
     t1 = time.perf_counter()
     matched = []
     for e in entities:
-        matched.extend(db.search_entities(e))
+        matched.extend(db.search_entities(e,limit = 3))
     matched = list(set(matched))
     print(f"  [matched graph nodes: {matched}]")
 
     if not matched:
         return "No matching information found in the graph.", {}
 
+    direct_chunks = db.get_chunks_for_entities(matched, limit=10)
     facts = db.traverse(matched)
     neo4j_time = time.perf_counter() - t1
     print(f"  [graph facts retrieved ({neo4j_time:.2f}s): {len(facts)} facts]")
     if not facts:
         return "No related facts found in the graph."
 
-    # Extract source text snippets attached to retrieved relationships
-    snippets = []
-    for f in facts:
-        if f.get("source_text") and f["source_text"] not in snippets:
-            snippets.append(f["source_text"])
-
+    snippets = list(set(direct_chunks + [f["source_text"] for f in facts if f.get("source_text")]))
+    
     # Prioritize snippets that explicitly contain matched specific entities
     prioritized_snippets = sorted(
         snippets, 
-        key=lambda text: score_snippet(text, entities),  
+        key=lambda text: score_snippet(text, question, entities),  
         reverse=True
     )
     # Pass the top 8 most relevant chunk texts to the LLM
-    answer, llm_metrics = generate_answer(question, facts, prioritized_snippets[:5])
+    answer, llm_metrics = generate_answer(question, facts, prioritized_snippets[:8])
 
     total_rag_time = time.perf_counter() - start_total_time
     llm_metrics["total_rag_latency_sec"] = round(total_rag_time, 2)

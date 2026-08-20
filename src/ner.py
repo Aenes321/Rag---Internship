@@ -138,6 +138,8 @@ STOP_ENTITIES = {
     "researcher", "researchers", "finding", "findings", "result", "results", 
     "effect", "effects", "impact", "evidence", "data", "analysis", 
     "group", "groups", "cohort", "subject", "subjects", "patient", "patients",
+    "percentage", "percentages", "proportion", "rate", "rates", 
+    "number", "numbers", "differences", "total", "cases", "figure", "figures",
 
     # Abstract / Categorical Concepts
     "bottom-up", "top-down", "mechanism", "mechanisms", "process", "processes", 
@@ -178,14 +180,14 @@ def _get_bounded_phrase(token) -> str:
     return _clean_entity_text(raw_phrase)
 
 def extract_entities(text: str):
-    """Return deduplicated entity strings found in text (used at query time)."""
+    """Return deduplicated entity strings and meaningful noun chunks."""
     doc = get_nlp()(text)
     seen = set()
     result = []
 
     citations = extract_citations(text)
     for cite in citations:
-        if cite not in seen and cite not in STOP_ENTITIES and cite not in PRONOUNS:
+        if cite not in seen and not is_generic_entity(cite):
             seen.add(cite)
             result.append(cite)
 
@@ -194,6 +196,14 @@ def extract_entities(text: str):
         if len(name) > 1 and name not in seen and not is_generic_entity(name):
             seen.add(name)
             result.append(name)
+
+    # 3. Noun Chunks (Captures complex clinical & financial metrics)
+    for chunk in doc.noun_chunks:
+        chunk_clean = _clean_entity_text(chunk.text)
+        if len(chunk_clean.split()) > 1 and chunk_clean not in seen and not is_generic_entity(chunk_clean):
+            seen.add(chunk_clean)
+            result.append(chunk_clean)
+
     return result
 
 

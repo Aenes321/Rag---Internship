@@ -4,14 +4,15 @@ import fitz  # PyMuPDF
 import unicodedata
 import config
 from graph_db import GraphDB
-from ner import extract_triples, get_nlp
+from ner import extract_triples, extract_entities, get_nlp, is_generic_entity
 import re
 
 def fix_pdf_ligatures(text: str) -> str:
     """
-    Systematically removes false spaces created by PDF font ligatures (fi, ff, fl, ffi, ffl)
-    and kerning artifacts (Th).
+    Systematically removes false spaces created by PDF font ligatures (fi, ff, fl, ffi, ffl),
+    kerning artifacts (Th), and hyphenation remnants.
     """
+    # "Th " kerning splits at word start (e.g., "Th e" -> "The", "Th is" -> "This")
     th_words = r"(e|is|ese|ose|ere|us|ree|ird|rough|roughout|en|an)"
     text = re.sub(r"\bTh\s+" + th_words + r"\b", r"Th\1", text)
     text = re.sub(r"\bth\s+" + th_words + r"\b", r"th\1", text)
@@ -67,6 +68,22 @@ def fix_pdf_ligatures(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
+    # Fix hyphenation remnants from PDF line wraps
+    dehyphen_remnants = [
+        (r"\brehabili\s+tation(s?)\b", r"rehabilitation\1"),
+        (r"\brehabili\s+tative\b", r"rehabilitative"),
+        (r"\benvi\s+ronment(s|al)?\b", r"environment\1"),
+        (r"\bcon\s+tralesional\b", r"contralesional"),
+        (r"\bipsi\s+lesional\b", r"ipsilesional"),
+        (r"\bpa\s+tient(s|'s|’s|s'|s’)?\b", r"patient\1"),
+        (r"\bneuro\s+psychological\b", r"neuropsychological"),
+        (r"\bvisuo\s+spatial\b", r"visuospatial"),
+        (r"\bextra\s+personal\b", r"extrapersonal"),
+        (r"\bperi\s+personal\b", r"peripersonal"),
+    ]
+    for pattern, replacement in dehyphen_remnants:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+
     return text
 
 
@@ -77,10 +94,10 @@ def remove_inline_citations_safely(text: str) -> str:
     clinical metrics, counts (375, 26, 5, 7, 14), decimals (0.05, 64.7), years (2022),
     and measurements.
     """
-    # 1. Bracketed citations: [1], [1-3], [1, 2], [1, 3, 5]
+    # Bracketed citations: [1], [1-3], [1, 2], [1, 3, 5]
     text = re.sub(r"\[\s*\d+(?:\s*[-–,]\s*\d+)*\s*\]", "", text)
 
-    # 2. Citations following 'et al.' (e.g., "Glover et al. 16,28 applied")
+    # Citations following 'et al.' (e.g., "Glover et al. 16,28 applied")
     text = re.sub(
         r"(?<=et al\.)\s*\d{1,3}(?:\s*[,–-]\s*\d{1,3})*(?=\s+[A-Za-z]|\s*[.,;]|$)",
         "",
@@ -88,7 +105,7 @@ def remove_inline_citations_safely(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # 3. Citations following sentence-ending period before a CAPITALIZED word
+    # Citations following sentence-ending period before a CAPITALIZED word
     # e.g., "space. 17 Castiello", "hygiene. 4,5 Previous", "ganglia. 1-3 Patients"
     # Followed by space + Capitalized word (A-Z) so numbers before lowercase words ("Class I, 7 as") are protected.
     text = re.sub(
@@ -97,7 +114,7 @@ def remove_inline_citations_safely(text: str) -> str:
         text,
     )
 
-    # 4. Citations glued directly to the end of a word (e.g. "hemiplegia9", "paretic side11")
+    # Citations glued directly to the end of a word (e.g. "hemiplegia9", "paretic side11")
     glued_citation = re.compile(
         r"(?P<prefix>[A-Za-z%\)])"
         r"(?P<lead>[.,;]?)"
@@ -106,7 +123,7 @@ def remove_inline_citations_safely(text: str) -> str:
     )
     text = glued_citation.sub(r"\g<prefix>\g<lead>", text)
 
-    # 5. Collapse double spaces left behind
+    # Collapse double spaces left behind
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text
 
@@ -318,6 +335,10 @@ def main():
         for idx, chunk in enumerate(chunks):
             chunk_id = f"{filename}_{idx}"
             triples = extract_triples(chunk)
+            entities_in_chunk = extract_entities(chunk)
+            entities_in_chunk = [normalize(e) for e in entities_in_chunk if e.strip() and not is_generic_entity(e)]
+            if entities_in_chunk:
+                db.write_chunk_entities(chunk_id, chunk, filename, entities_in_chunk)
 
             for t in triples:
                 subject = normalize(t.get("subject", ""))
