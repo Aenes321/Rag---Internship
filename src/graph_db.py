@@ -81,15 +81,14 @@ class GraphDB:
             return [r["source_text"] for r in result]
 
     def search_entities(self, query_text: str, limit: int = 5):
-        escaped = _escape_lucene(query_text)
-        words = [w for w in escaped.split() if w]
+        cleaned = re.sub(r'^(the|a|an)\s+', '', query_text.strip(), flags=re.IGNORECASE)
+        escaped = _escape_lucene(cleaned)
+        words = [w for w in escaped.split() if len(w) > 2]
         if not words:
             return []
-        
-        # Try exact phrase search first, then token prefixes
-        phrase_query = f'"{escaped}"'
-        prefix_query = " AND ".join([f"{w}*" for w in words])
-        combined_query = f"{phrase_query}^2 OR ({prefix_query})"
+
+        # Match tokens with OR so partial node overlaps still match
+        lucene_query = " OR ".join([f"{w}*" for w in words])
 
         cypher = """
         CALL db.index.fulltext.queryNodes('entityIndex', $query_text) YIELD node, score
@@ -98,7 +97,7 @@ class GraphDB:
         LIMIT $limit
         """
         with self.driver.session() as session:
-            result = session.run(cypher, query_text=combined_query, limit=limit)
+            result = session.run(cypher, query_text=lucene_query, limit=limit)
             return [record["name"] for record in result]
 
     def traverse(self, entity_names, hops: int = 2, limit: int = 25):

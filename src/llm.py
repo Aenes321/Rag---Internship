@@ -2,7 +2,7 @@ import json
 import requests
 import config
 
-def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> str:
+def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> (str, dict):
     payload = {
         "model": config.OLLAMA_MODEL,
         "prompt": prompt,

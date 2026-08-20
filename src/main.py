@@ -25,23 +25,34 @@ def score_snippet(text: str, query: str, entities: list) -> int:
 
     return score
 
-def answer_question(db: GraphDB, question: str) -> str:
+def answer_question(db: GraphDB, question: str) -> (str, dict):
     start_total_time = time.perf_counter()
 
     t0 = time.perf_counter()
-    entities = extract_entities(question)
-    entities = [normalize(e) for e in entities if e.strip()]
-    entities = sorted(entities, key=lambda e: len(e.split()), reverse=True)
-    ner_time = time.perf_counter() - t0
-    print(f"  [entities extracted ({ner_time:.2f}s): {entities}]")
+    raw_entities = extract_entities(question)
 
-    if not entities:
+    # Clean and normalize
+    cleaned_entities = []
+    for e in raw_entities:
+        norm = normalize(re.sub(r'^(the|a|an)\s+', '', e.strip(), flags=re.IGNORECASE))
+        if norm and norm not in cleaned_entities:
+            cleaned_entities.append(norm)
+
+    compound_entities = [e for e in cleaned_entities if len(e.split()) > 1]
+    
+    # Use compound phrases first; fall back to non-generic singles
+    search_pool = compound_entities if compound_entities else cleaned_entities
+
+    ner_time = time.perf_counter() - t0
+    print(f"  [entities extracted ({ner_time:.2f}s): {search_pool}]")
+
+    if not search_pool:
         return "Couldn't identify relevant entities in the question.", {}
 
     t1 = time.perf_counter()
     matched = []
-    for e in entities:
-        matched.extend(db.search_entities(e,limit = 3))
+    for e in search_pool:
+        matched.extend(db.search_entities(e, limit=3))
     matched = list(set(matched))
     print(f"  [matched graph nodes: {matched}]")
 
@@ -60,7 +71,7 @@ def answer_question(db: GraphDB, question: str) -> str:
     # Prioritize snippets that explicitly contain matched specific entities
     prioritized_snippets = sorted(
         snippets, 
-        key=lambda text: score_snippet(text, question, entities),  
+        key=lambda text: score_snippet(text, question, compound_entities),  
         reverse=True
     )
     # Pass the top 8 most relevant chunk texts to the LLM

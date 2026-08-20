@@ -105,7 +105,7 @@ def run_rag_and_evaluate(
 
 if __name__ == "__main__":
     # Specify input file and output file paths
-    INPUT_FILE = "test_set.csv"
+    INPUT_FILE = "../test_set.csv"
     OUTPUT_CSV = "evaluation_results.csv"
     OUTPUT_JSON = "evaluation_summary.json"
 
