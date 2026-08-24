@@ -45,6 +45,8 @@ services:
       - .env
     stdin_open: true
     tty: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: ["tail", "-f", "/dev/null"]
 
 volumes:

@@ -46,25 +46,37 @@ def run_rag_and_evaluate(
     db = GraphDB()
 
     generated_answers = []
-    rag_latencies = []
+    metrics_list = []
 
     try:
         for idx, row in test_df.iterrows():
             q = row["question"]
             print(f"  Processing Question {idx + 1}/{len(test_df)}: {q[:60]}...")
             
-            t0 = time.perf_counter()
             gen_ans, metrics = answer_question(db, q)
-            latency = time.perf_counter() - t0
+
+            if metrics:
+                print("=" * 50)
+                print("  PERFORMANCE METRICS:")
+                print(f"  • Generation Speed : {metrics.get('generation_speed_tok_sec', 0)} tokens/sec")
+                print(f"  • Prompt Eval Speed : {metrics.get('prompt_speed_tok_sec', 0)} tokens/sec")
+                print(f"  • Generated Tokens  : {metrics.get('generated_tokens', 0)} tokens")
+                print(f"  • Prompt Context    : {metrics.get('prompt_tokens', 0)} tokens")
+                print(f"  • NER Latency       : {metrics.get('ner_latency_sec', 0)}s")
+                print(f"  • Neo4j Latency     : {metrics.get('neo4j_latency_sec', 0)}s")
+                print(f"  • LLM Latency       : {metrics.get('llm_latency_sec', 0)}s")
+                print(f"  • Total RAG Latency : {metrics.get('total_rag_latency_sec', 0)}s")
+                print("=" * 50 + "\n")
 
             generated_answers.append(gen_ans)
-            rag_latencies.append(round(latency, 2))
+            metrics_list.append(metrics)
     finally:
         db.close()
 
     test_df["generated_answer"] = generated_answers
-    test_df["rag_latency_sec"] = rag_latencies
-
+    metrics_df = pd.DataFrame(metrics_list)
+    for col in metrics_df.columns:
+        test_df[col] = metrics_df[col]
     # 3. Compute BERTScore & Cosine Similarity Metrics
     print("\n[3/4] Computing evaluation metrics (BERTScore & Cosine Similarity)...")
     evaluator = RAGEvaluator(st_model_name="all-MiniLM-L6-v2", bert_lang="en")
@@ -75,8 +87,9 @@ def run_rag_and_evaluate(
         questions=test_df["question"].tolist(),
     )
 
-    # Merge RAG Latency back into evaluation results
-    eval_results_df["rag_latency_sec"] = test_df["rag_latency_sec"]
+    # Attach all granular latency and token metrics to final results
+    for col in metrics_df.columns:
+        eval_results_df[col] = test_df[col]
 
     # 4. Save Results to Output Files
     print(f"\n[4/4] Writing output results to files...")
@@ -87,7 +100,12 @@ def run_rag_and_evaluate(
 
     # Compute & Save Summary Metrics
     summary_metrics = evaluator.summarize_results(eval_results_df)
-    summary_metrics["mean_rag_latency_sec"] = round(eval_results_df["rag_latency_sec"].mean(), 2)
+    summary_metrics["mean_generation_speed_tok_sec"] = round(eval_results_df["generation_speed_tok_sec"].mean(), 2)
+    summary_metrics["mean_prompt_speed_tok_sec"] = round(eval_results_df["prompt_speed_tok_sec"].mean(), 2)
+    summary_metrics["mean_ner_latency_sec"] = round(eval_results_df["ner_latency_sec"].mean(), 2)
+    summary_metrics["mean_neo4j_latency_sec"] = round(eval_results_df["neo4j_latency_sec"].mean(), 2)
+    summary_metrics["mean_llm_latency_sec"] = round(eval_results_df["llm_latency_sec"].mean(), 2)
+    summary_metrics["mean_total_rag_latency_sec"] = round(eval_results_df["total_rag_latency_sec"].mean(), 2)
     summary_metrics["total_samples_evaluated"] = len(eval_results_df)
 
     with open(output_summary_json, "w", encoding="utf-8") as f:

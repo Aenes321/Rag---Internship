@@ -25,10 +25,10 @@ def score_snippet(text: str, query: str, entities: list) -> int:
 
     return score
 
-def answer_question(db: GraphDB, question: str) -> (str, dict):
+def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
     start_total_time = time.perf_counter()
 
-    t0 = time.perf_counter()
+    start_ner = time.perf_counter()
     raw_entities = extract_entities(question)
 
     # Clean and normalize
@@ -43,13 +43,27 @@ def answer_question(db: GraphDB, question: str) -> (str, dict):
     # Use compound phrases first; fall back to non-generic singles
     search_pool = compound_entities if compound_entities else cleaned_entities
 
-    ner_time = time.perf_counter() - t0
-    print(f"  [entities extracted ({ner_time:.2f}s): {search_pool}]")
+    ner_latency = time.perf_counter() - start_ner
+
+    default_metrics = {
+        "prompt_eval_latency": 0.0,
+        "generation_eval_latency": 0.0,
+        "prompt_tokens": 0,
+        "generated_tokens": 0,
+        "generation_speed_tok_sec": 0.0,
+        "prompt_speed_tok_sec": 0.0,
+        "ner_latency_sec": round(ner_latency, 2),
+        "neo4j_latency_sec": 0.0,
+        "llm_latency_sec": 0.0,
+        "total_rag_latency_sec": round(time.perf_counter() - start_total_time, 2),
+    }
+
+    print(f"  [entities extracted ({ner_latency:.2f}s): {search_pool}]")
 
     if not search_pool:
-        return "Couldn't identify relevant entities in the question.", {}
+        return "Couldn't identify relevant entities in the question.", default_metrics
 
-    t1 = time.perf_counter()
+    start_neo4j = time.perf_counter()
     matched = []
     for e in search_pool:
         matched.extend(db.search_entities(e, limit=3))
@@ -57,29 +71,42 @@ def answer_question(db: GraphDB, question: str) -> (str, dict):
     print(f"  [matched graph nodes: {matched}]")
 
     if not matched:
-        return "No matching information found in the graph.", {}
+        default_metrics["neo4j_latency_sec"] = round(time.perf_counter() - start_neo4j, 2)
+        default_metrics["total_rag_latency_sec"] = round(time.perf_counter() - start_total_time, 2)
+        return "No matching information found in the graph.", default_metrics
 
     direct_chunks = db.get_chunks_for_entities(matched, limit=10)
     facts = db.traverse(matched)
-    neo4j_time = time.perf_counter() - t1
-    print(f"  [graph facts retrieved ({neo4j_time:.2f}s): {len(facts)} facts]")
+    neo4j_latency = time.perf_counter() - start_neo4j
+    print(f"  [graph facts retrieved ({neo4j_latency:.2f}s): {len(facts)} facts]")
     if not facts:
-        return "No related facts found in the graph."
+        default_metrics["neo4j_latency_sec"] = round(neo4j_latency, 2)
+        default_metrics["total_rag_latency_sec"] = round(time.perf_counter() - start_total_time, 2)
+        return "No related facts found in the graph.", default_metrics
 
-    snippets = list(set(direct_chunks + [f["source_text"] for f in facts if f.get("source_text")]))
-    
-    # Prioritize snippets that explicitly contain matched specific entities
-    prioritized_snippets = sorted(
-        snippets, 
-        key=lambda text: score_snippet(text, question, compound_entities),  
-        reverse=True
-    )
+    combined = direct_chunks + [f["source_text"] for f in facts if f.get("source_text")]
+    snippets = list(dict.fromkeys(combined))  # dedup, order-preserving
+
+    scored = [(s, score_snippet(s, question, compound_entities)) for s in snippets]
+    relevant = [(s, sc) for s, sc in scored if sc > 0]
+
+    if relevant:
+        prioritized_snippets = [s for s, _ in sorted(relevant, key=lambda pair: pair[1], reverse=True)]
+    else:
+        # No snippet had keyword overlap — fall back to the first candidate,
+        # in original (not scored) order, rather than an arbitrary one.
+        prioritized_snippets = snippets[:1]
+
     # Pass the top 8 most relevant chunk texts to the LLM
+    start_llm = time.perf_counter()
     answer, llm_metrics = generate_answer(question, facts, prioritized_snippets[:8])
+    llm_latency = time.perf_counter() - start_llm
 
-    total_rag_time = time.perf_counter() - start_total_time
-    llm_metrics["total_rag_latency_sec"] = round(total_rag_time, 2)
-    llm_metrics["neo4j_time_sec"] = round(neo4j_time, 2)
+    total_latency = time.perf_counter() - start_total_time
+    llm_metrics["ner_latency_sec"] = round(ner_latency, 2)
+    llm_metrics["neo4j_latency_sec"] = round(neo4j_latency, 2)
+    llm_metrics["llm_latency_sec"] = round(llm_latency, 2)
+    llm_metrics["total_rag_latency_sec"] = round(total_latency, 2)
 
     return answer, llm_metrics
 
@@ -102,12 +129,15 @@ def main():
             if metrics:
                 print("=" * 50)
                 print("  PERFORMANCE METRICS:")
-                print(f"  • Generation Speed : {metrics['generation_speed_tok_sec']} tokens/sec")
+                print(f"  • NER Latency       : {metrics['ner_latency_sec']}s")
+                print(f"  • Neo4j Latency     : {metrics['neo4j_latency_sec']}s")
+                print(f"  • Prompt Evaluation Latency : {metrics['prompt_eval_latency']} s")
+                print(f"  • LLM Generation Latency : {metrics['generation_eval_latency']} s")
+                print(f"  • LLM Latency       : {metrics['llm_total_sec']}s")
+                print(f"  • Prompt Context    : {metrics['prompt_tokens']} tokens")
                 print(f"  • Prompt Eval Speed : {metrics['prompt_speed_tok_sec']} tokens/sec")
                 print(f"  • Generated Tokens  : {metrics['generated_tokens']} tokens")
-                print(f"  • Prompt Context    : {metrics['prompt_tokens']} tokens")
-                print(f"  • LLM Latency       : {metrics['llm_total_sec']}s")
-                print(f"  • Neo4j Latency     : {metrics['neo4j_time_sec']}s")
+                print(f"  • Generation Speed : {metrics['generation_speed_tok_sec']} tokens/sec")
                 print(f"  • Total RAG Latency : {metrics['total_rag_latency_sec']}s")
                 print("=" * 50 + "\n")
     finally:

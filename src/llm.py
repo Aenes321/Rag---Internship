@@ -2,39 +2,55 @@ import json
 import requests
 import config
 
-def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> (str, dict):
+def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tuple[str, dict]:
     payload = {
         "model": config.OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
+        "options": {
+            "temperature": 0.0,
+            "num_predict": 250,   # Stop after 250 tokens (prevents endless generation)
+        }
     }
     if system:
         payload["system"] = system
     if json_mode:
         payload["format"] = "json"
+    timeout_limit = 180  # seconds
+    try :
+        response = requests.post(f"{config.OLLAMA_URL}/api/generate", json=payload, timeout=180)
+        response.raise_for_status()
+        data = response.json()
 
-    response = requests.post(f"{config.OLLAMA_URL}/api/generate", json=payload, timeout=180)
-    response.raise_for_status()
-    data = response.json()
+        # Ollama returns durations in nanoseconds (1 second = 1e9 nanoseconds)
+        eval_count = data.get("eval_count", 0)
+        eval_duration_sec = data.get("eval_duration", 0) / 1e9
 
-    # Ollama returns durations in nanoseconds (1 second = 1e9 nanoseconds)
-    eval_count = data.get("eval_count", 0)
-    eval_duration_sec = data.get("eval_duration", 0) / 1e9
+        prompt_eval_count = data.get("prompt_eval_count", 0)
+        prompt_eval_sec = data.get("prompt_eval_duration", 0) / 1e9
 
-    prompt_eval_count = data.get("prompt_eval_count", 0)
-    prompt_eval_sec = data.get("prompt_eval_duration", 0) / 1e9
+        total_duration_sec = data.get("total_duration", 0) / 1e9
 
-    total_duration_sec = data.get("total_duration", 0) / 1e9
+        metrics = {
+            "prompt_eval_latency": round(prompt_eval_sec, 2),
+            "prompt_tokens": prompt_eval_count,
+            "prompt_speed_tok_sec": round(prompt_eval_count / prompt_eval_sec, 2) if prompt_eval_sec > 0 else 0,
+            "generation_eval_latency": round(eval_duration_sec, 2),
+            "generated_tokens": eval_count,
+            "generation_speed_tok_sec": round(eval_count / eval_duration_sec, 2) if eval_duration_sec > 0 else 0,
+            
+            "llm_total_sec": round(total_duration_sec, 2),
+        }
 
-    metrics = {
-        "prompt_tokens": prompt_eval_count,
-        "generated_tokens": eval_count,
-        "generation_speed_tok_sec": round(eval_count / eval_duration_sec, 2) if eval_duration_sec > 0 else 0,
-        "prompt_speed_tok_sec": round(prompt_eval_count / prompt_eval_sec, 2) if prompt_eval_sec > 0 else 0,
-        "llm_total_sec": round(total_duration_sec, 2),
-    }
-
-    return data["response"], metrics
+        return data["response"], metrics
+    
+    except requests.exceptions.Timeout:
+        print("  [WARNING] Ollama request timed out.")
+        return "Error: LLM response timed out.", {
+            "prompt_tokens": 0, "generated_tokens": 0,
+            "generation_speed_tok_sec": 0.0, "prompt_speed_tok_sec": 0.0,
+            "llm_total_sec": timeout_limit, "prompt_eval_latency": 0.0, "generation_eval_latency": 0.0
+        }
 
 
 ENTITY_SYSTEM = """Extract the key medical entities (diseases, symptoms, drugs,
@@ -96,6 +112,7 @@ information isn't sufficient to answer, say so plainly. Be clear, concise,
 and do not invent information that isn't supported by the provided context. 
 
 CRITICAL FORMATTING INSTRUCTIONS:
+1.Answer ONLY what the user explicitly asked. Do NOT include side notes, extrapolations, or summaries of other topics present in the context (e.g., do NOT discuss future research, VR, hardware, or other topics unless directly asked in the question).
 1. Write in natural, fluid sentences and paragraphs.
 2. NEVER output raw relationship tags or uppercase keywords (e.g., DO NOT write "ASSESSED_BY", "AFFECTS", or "STIMULATE" in capital letters).
 3. Integrate entities and relations smoothly into grammatical prose.
