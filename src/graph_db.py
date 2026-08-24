@@ -87,8 +87,7 @@ class GraphDB:
         if not words:
             return []
 
-        # Match tokens with OR so partial node overlaps still match
-        lucene_query = " OR ".join([f"{w}*" for w in words])
+        lucene_query = " AND ".join([f"{w}*" for w in words])
 
         cypher = """
         CALL db.index.fulltext.queryNodes('entityIndex', $query_text) YIELD node, score

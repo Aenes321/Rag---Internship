@@ -1,5 +1,5 @@
 from graph_db import GraphDB
-from ner import extract_entities         # fast local extraction, no LLM calls
+from ner import extract_entities, is_generic_entity         # fast local extraction, no LLM calls
 from llm import generate_answer          # LLM still used for final answer synthesis
 import time
 import re
@@ -13,12 +13,25 @@ def score_snippet(text: str, query: str, entities: list) -> int:
     
     # Reward compound entity matches heavily
     for e in entities:
-        if len(e.split()) > 1 and e in text_lower:
-            score += 5.0
-        elif e in text_lower:
-            score += 1.0
+        e_lower = e.lower().strip()
+        if len(e_lower) <= 2:
+            continue
 
-    # Reward chunks containing numerical or monetary figures relevant to quantitative questions
+        count = len(re.findall(r'\b' + re.escape(e_lower) + r'\b', text_lower))
+        if count == 0:
+            continue
+        count = min(count, 3)
+
+        words = e_lower.split()
+        if len(words) > 1:
+            weight = 5
+        elif is_generic_entity(e_lower):
+            weight = 1          # generic single word — low signal
+        else:
+            weight = 3          # specific single word (e.g. "saccades", "usn") — closer to compound value
+
+        score += count * weight
+
     if any(char.isdigit() for char in query):
         digits_in_snippet = len(re.findall(r'\b\d+(?:\.\d+)?\b', text))
         score += min(digits_in_snippet * 0.5, 3.0)
@@ -30,19 +43,17 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
 
     start_ner = time.perf_counter()
     raw_entities = extract_entities(question)
-
     # Clean and normalize
     cleaned_entities = []
     for e in raw_entities:
         norm = normalize(re.sub(r'^(the|a|an)\s+', '', e.strip(), flags=re.IGNORECASE))
         if norm and norm not in cleaned_entities:
             cleaned_entities.append(norm)
-
     compound_entities = [e for e in cleaned_entities if len(e.split()) > 1]
-    
+    single_entities = [e for e in cleaned_entities if len(e.split()) == 1]
     # Use compound phrases first; fall back to non-generic singles
-    search_pool = compound_entities if compound_entities else cleaned_entities
-
+    search_pool = compound_entities + [
+    e for e in single_entities if not any(e in c.split() for c in compound_entities)]
     ner_latency = time.perf_counter() - start_ner
 
     default_metrics = {
@@ -133,7 +144,7 @@ def main():
                 print(f"  • Neo4j Latency     : {metrics['neo4j_latency_sec']}s")
                 print(f"  • Prompt Evaluation Latency : {metrics['prompt_eval_latency']} s")
                 print(f"  • LLM Generation Latency : {metrics['generation_eval_latency']} s")
-                print(f"  • LLM Latency       : {metrics['llm_total_sec']}s")
+                print(f"  • LLM Latency       : {metrics['llm_latency_sec']}s")
                 print(f"  • Prompt Context    : {metrics['prompt_tokens']} tokens")
                 print(f"  • Prompt Eval Speed : {metrics['prompt_speed_tok_sec']} tokens/sec")
                 print(f"  • Generated Tokens  : {metrics['generated_tokens']} tokens")

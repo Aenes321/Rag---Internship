@@ -356,6 +356,5 @@ def main():
     print("Browse the graph at http://localhost:7474")
     db.close()
 
-
 if __name__ == "__main__":
     main()

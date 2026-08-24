@@ -39,7 +39,7 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tu
             "generated_tokens": eval_count,
             "generation_speed_tok_sec": round(eval_count / eval_duration_sec, 2) if eval_duration_sec > 0 else 0,
             
-            "llm_total_sec": round(total_duration_sec, 2),
+            "llm_latency_sec": round(total_duration_sec, 2),
         }
 
         return data["response"], metrics
@@ -49,12 +49,12 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tu
         return "Error: LLM response timed out.", {
             "prompt_tokens": 0, "generated_tokens": 0,
             "generation_speed_tok_sec": 0.0, "prompt_speed_tok_sec": 0.0,
-            "llm_total_sec": timeout_limit, "prompt_eval_latency": 0.0, "generation_eval_latency": 0.0
+            "llm_latency_sec": timeout_limit, "prompt_eval_latency": 0.0, "generation_eval_latency": 0.0
         }
 
 
-ENTITY_SYSTEM = """Extract the key medical entities (diseases, symptoms, drugs,
-treatments, tests, risk factors) mentioned in the user's question.
+ENTITY_SYSTEM = """You are an expert medical and neurorehabilitation entity extractor.
+Extract all key concepts, medical entities, physiological measures, technologies, and study citations mentioned in the user's question.
 Return ONLY valid JSON: {"entities": ["...", "..."]}
 Keep each entity short (a few words)."""
 

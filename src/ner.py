@@ -14,6 +14,8 @@ PRONOUNS = {
     "myself", "yourself", "himself", "herself", "itself", "ourselves", "themselves"
 }
 
+LEADING_STRIP_WORDS = PRONOUNS | {"the", "a", "an", "some", "any", "such", "no"}
+
 # Regex patterns for citations (e.g., "Choi et al.", "Choi et al. (2021)", "Choi et al., 2021")
 CITATION_PATTERN = re.compile(
     r'\b[A-Z][a-zA-Z\-]+(?:\s+et\s+al\.?|\s+and\s+[A-Z][a-zA-Z\-]+)?(?:\s*,?\s*\(?\d{4}\)?)?\b'
@@ -151,13 +153,20 @@ def _clean_entity_text(text: str) -> str:
     """Strips PDF artifacts, normalizes spaces, and enforces a max token length."""
     # Remove OCR symbols, bullets, and PDF layout labels
     text = PDF_ARTIFACT_PATTERN.sub(" ", text)
-    # Remove floating digits/punctuation at start or end
+    # Strip trailing possessive markers ("patients' ", "USN's ") so possessive
+    # noun-chunk spans normalize to the same node as their bare form.
     text = re.sub(r"^[^\w]+|[^\w]+$", "", text)
+    text = re.sub(r"(\w)['’]s\b", r"\1", text)
+    text = re.sub(r"(\w)s['’]\s", r"\1s ", text)
     # Normalize whitespaces
     norm = _normalize(text)
     
     # Cap entities to max 8 words to avoid absorbing entire paragraphs/headers
     words = norm.split()
+    while words and words[0] in LEADING_STRIP_WORDS:
+        words = words[1:]
+    norm = " ".join(words)
+
     if len(words) > 8:
         norm = " ".join(words[:8])
         
@@ -200,10 +209,22 @@ def extract_entities(text: str):
     # 3. Noun Chunks (Captures complex clinical & financial metrics)
     for chunk in doc.noun_chunks:
         chunk_clean = _clean_entity_text(chunk.text)
-        if len(chunk_clean.split()) > 1 and chunk_clean not in seen and not is_generic_entity(chunk_clean):
-            seen.add(chunk_clean)
-            result.append(chunk_clean)
+        if not chunk_clean or chunk_clean in seen or is_generic_entity(chunk_clean):
+            continue
 
+        words = chunk_clean.split()
+        if len(words) > 1:
+             seen.add(chunk_clean)
+             result.append(chunk_clean)
+        else:
+            # Single-word chunks were previously dropped outright, which
+            # silently discarded standalone domain terms (e.g. "saccades",
+            # "neglect"). Keep them when the head token is a real noun and
+            # long enough not to be leftover noise.
+            root = chunk.root
+            if root.pos_ in ("NOUN", "PROPN") and len(chunk_clean) >= 4:
+                seen.add(chunk_clean)
+                result.append(chunk_clean)
     return result
 
 

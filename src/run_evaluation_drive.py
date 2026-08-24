@@ -91,10 +91,10 @@ def answer_question(question: str) -> (str, dict):
     # ------------------
     total_latency = time.perf_counter() - start_total
 
-    llm_metrics["total_rag_latency_sec"] = round(total_latancy, 2)
+    llm_metrics["total_rag_latency_sec"] = round(total_latency, 2)
     llm_metrics["embed_latency_sec"] = round(embed_latency, 2)
     llm_metrics["retrieve_latency_sec"] = round(retrieve_latency, 2)
-    llm_metrics["llm_latenc_sec"] = round(llm_latency, 2)
+    llm_metrics["llm_latency_sec"] = round(llm_latency, 2)
 
     return answer, llm_metrics
 
