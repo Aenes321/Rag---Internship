@@ -97,7 +97,7 @@ class GraphDB:
         """
         with self.driver.session() as session:
             result = session.run(cypher, query_text=lucene_query, limit=limit)
-            return [record["name"] for record in result]
+            return [(record["name"], record["score"]) for record in result]
 
     def traverse(self, entity_names, hops: int = 2, limit: int = 25):
         cypher = f"""

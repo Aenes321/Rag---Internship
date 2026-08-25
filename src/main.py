@@ -53,7 +53,7 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
     single_entities = [e for e in cleaned_entities if len(e.split()) == 1]
     # Use compound phrases first; fall back to non-generic singles
     search_pool = compound_entities + [
-    e for e in single_entities if not any(e in c.split() for c in compound_entities)]
+        e for e in single_entities if not any(e in c.split() for c in compound_entities)]
     ner_latency = time.perf_counter() - start_ner
 
     default_metrics = {
@@ -75,11 +75,18 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
         return "Couldn't identify relevant entities in the question.", default_metrics
 
     start_neo4j = time.perf_counter()
-    matched = []
+
+    # search_entities now returns (name, score) pairs. If the same node comes
+    # back for more than one query entity, keep its best (highest) score.
+    matched_scores: dict[str, float] = {}
     for e in search_pool:
-        matched.extend(db.search_entities(e, limit=3))
-    matched = list(set(matched))
-    print(f"  [matched graph nodes: {matched}]")
+        for name, score in db.search_entities(e, limit=3):
+            if name not in matched_scores or score > matched_scores[name]:
+                matched_scores[name] = score
+
+    MIN_MATCH_SCORE = 0.5 
+    matched = [name for name, score in matched_scores.items() if score >= MIN_MATCH_SCORE]
+    print(f"  [matched graph nodes: {sorted(matched_scores.items(), key=lambda p: p[1], reverse=True)}]")
 
     if not matched:
         default_metrics["neo4j_latency_sec"] = round(time.perf_counter() - start_neo4j, 2)
@@ -95,22 +102,35 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
         default_metrics["total_rag_latency_sec"] = round(time.perf_counter() - start_total_time, 2)
         return "No related facts found in the graph.", default_metrics
 
+    # --- Score and filter chunk snippets (unchanged from before) ---
     combined = direct_chunks + [f["source_text"] for f in facts if f.get("source_text")]
     snippets = list(dict.fromkeys(combined))  # dedup, order-preserving
 
-    scored = [(s, score_snippet(s, question, compound_entities)) for s in snippets]
-    relevant = [(s, sc) for s, sc in scored if sc > 0]
+    scored_snippets = [(s, score_snippet(s, question, compound_entities)) for s in snippets]
+    relevant_snippets = [(s, sc) for s, sc in scored_snippets if sc > 0]
 
-    if relevant:
-        prioritized_snippets = [s for s, _ in sorted(relevant, key=lambda pair: pair[1], reverse=True)]
+    if relevant_snippets:
+        prioritized_snippets = [s for s, _ in sorted(relevant_snippets, key=lambda pair: pair[1], reverse=True)]
     else:
-        # No snippet had keyword overlap — fall back to the first candidate,
-        # in original (not scored) order, rather than an arbitrary one.
         prioritized_snippets = snippets[:1]
 
-    # Pass the top 8 most relevant chunk texts to the LLM
+    # --- Score and filter graph facts before they reach the LLM ---
+    # Previously `facts` went to generate_answer completely unfiltered, so
+    # noise pulled in via traverse() (e.g. from a loosely-matched node) could
+    # dominate the prompt even when score_snippet would have rejected it.
+    scored_facts = [(f, score_snippet(f.get("source_text", "") or "", question, compound_entities)) for f in facts]
+    relevant_facts = [(f, sc) for f, sc in scored_facts if sc > 0]
+
+    if relevant_facts:
+        prioritized_facts = [f for f, _ in sorted(relevant_facts, key=lambda pair: pair[1], reverse=True)]
+    else:
+        # Nothing scored — fall back to the raw fact list rather than
+        # silently sending zero facts to the LLM.
+        prioritized_facts = facts
+
+    # Pass the top facts and top 8 most relevant chunk texts to the LLM
     start_llm = time.perf_counter()
-    answer, llm_metrics = generate_answer(question, facts, prioritized_snippets[:8])
+    answer, llm_metrics = generate_answer(question, prioritized_facts[:15], prioritized_snippets[:8])
     llm_latency = time.perf_counter() - start_llm
 
     total_latency = time.perf_counter() - start_total_time
