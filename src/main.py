@@ -87,7 +87,13 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
 
     for e in search_pool:
         is_compound = len(e.split()) > 1
-        for name, score in db.search_entities(e, limit=3):
+        results = db.search_entities(e, limit=3)
+        if not results:
+            continue
+        best_score = max(score for _, score in results)
+        for name, score in results:
+            if score < best_score * 0.5:  # discard results much weaker than this entity's best
+                continue
             if name not in matched_scores or score > matched_scores[name]:
                 matched_scores[name] = score
             if is_compound:
