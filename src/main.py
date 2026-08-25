@@ -43,7 +43,6 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
 
     start_ner = time.perf_counter()
     raw_entities = extract_entities(question)
-    # Clean and normalize
     cleaned_entities = []
     for e in raw_entities:
         norm = normalize(re.sub(r'^(the|a|an)\s+', '', e.strip(), flags=re.IGNORECASE))
@@ -51,9 +50,9 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
             cleaned_entities.append(norm)
     compound_entities = [e for e in cleaned_entities if len(e.split()) > 1]
     single_entities = [e for e in cleaned_entities if len(e.split()) == 1]
-    # Use compound phrases first; fall back to non-generic singles
     search_pool = compound_entities + [
-        e for e in single_entities if not any(e in c.split() for c in compound_entities)]
+        e for e in single_entities if not any(e in c.split() for c in compound_entities)
+    ]
     ner_latency = time.perf_counter() - start_ner
 
     default_metrics = {
@@ -76,16 +75,25 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
 
     start_neo4j = time.perf_counter()
 
-    # search_entities now returns (name, score) pairs. If the same node comes
-    # back for more than one query entity, keep its best (highest) score.
+    # matched_scores: every node any entity matched, with its best Lucene score.
+    # seed_nodes: the subset used to actually seed graph traversal. Only
+    # compound-entity matches qualify -- single-word entities (e.g. "stroke",
+    # "usa") tend to be high-degree hub nodes in a domain-specific corpus, and
+    # traversing from a hub pulls in whatever topic dominates the corpus
+    # rather than anything specific to the question. Singles are still used
+    # below for scoring/filtering chunk text, just not for seeding traversal.
     matched_scores: dict[str, float] = {}
+    seed_nodes: set[str] = set()
+
     for e in search_pool:
+        is_compound = len(e.split()) > 1
         for name, score in db.search_entities(e, limit=3):
             if name not in matched_scores or score > matched_scores[name]:
                 matched_scores[name] = score
+            if is_compound:
+                seed_nodes.add(name)
 
-    MIN_MATCH_SCORE = 0.5 
-    matched = [name for name, score in matched_scores.items() if score >= MIN_MATCH_SCORE]
+    matched = list(matched_scores.keys())
     print(f"  [matched graph nodes: {sorted(matched_scores.items(), key=lambda p: p[1], reverse=True)}]")
 
     if not matched:
@@ -93,8 +101,16 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
         default_metrics["total_rag_latency_sec"] = round(time.perf_counter() - start_total_time, 2)
         return "No matching information found in the graph.", default_metrics
 
-    direct_chunks = db.get_chunks_for_entities(matched, limit=10)
-    facts = db.traverse(matched)
+    if not seed_nodes:
+        # No compound entity found a graph match -- fall back to the single
+        # highest-confidence match rather than every generic node, to avoid
+        # hub-node topic drift dominating the traversal.
+        seed_nodes = {max(matched_scores, key=matched_scores.get)}
+
+    print(f"  [traversal seed nodes: {seed_nodes}]")
+
+    direct_chunks = db.get_chunks_for_entities(list(seed_nodes), limit=10)
+    facts = db.traverse(list(seed_nodes))
     neo4j_latency = time.perf_counter() - start_neo4j
     print(f"  [graph facts retrieved ({neo4j_latency:.2f}s): {len(facts)} facts]")
     if not facts:
@@ -102,33 +118,26 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
         default_metrics["total_rag_latency_sec"] = round(time.perf_counter() - start_total_time, 2)
         return "No related facts found in the graph.", default_metrics
 
-    # --- Score and filter chunk snippets (unchanged from before) ---
     combined = direct_chunks + [f["source_text"] for f in facts if f.get("source_text")]
-    snippets = list(dict.fromkeys(combined))  # dedup, order-preserving
+    snippets = list(dict.fromkeys(combined))
 
-    scored_snippets = [(s, score_snippet(s, question, compound_entities)) for s in snippets]
+    # Score using the FULL entity set (not just compound_entities) -- singles
+    # like "stroke"/"usa" are weak signals but still meaningful for ranking
+    # text, even though they're excluded from seeding traversal above.
+    scored_snippets = [(s, score_snippet(s, question, search_pool)) for s in snippets]
     relevant_snippets = [(s, sc) for s, sc in scored_snippets if sc > 0]
+    prioritized_snippets = (
+        [s for s, _ in sorted(relevant_snippets, key=lambda pair: pair[1], reverse=True)]
+        if relevant_snippets else snippets[:1]
+    )
 
-    if relevant_snippets:
-        prioritized_snippets = [s for s, _ in sorted(relevant_snippets, key=lambda pair: pair[1], reverse=True)]
-    else:
-        prioritized_snippets = snippets[:1]
-
-    # --- Score and filter graph facts before they reach the LLM ---
-    # Previously `facts` went to generate_answer completely unfiltered, so
-    # noise pulled in via traverse() (e.g. from a loosely-matched node) could
-    # dominate the prompt even when score_snippet would have rejected it.
-    scored_facts = [(f, score_snippet(f.get("source_text", "") or "", question, compound_entities)) for f in facts]
+    scored_facts = [(f, score_snippet(f.get("source_text", "") or "", question, search_pool)) for f in facts]
     relevant_facts = [(f, sc) for f, sc in scored_facts if sc > 0]
+    prioritized_facts = (
+        [f for f, _ in sorted(relevant_facts, key=lambda pair: pair[1], reverse=True)]
+        if relevant_facts else facts
+    )
 
-    if relevant_facts:
-        prioritized_facts = [f for f, _ in sorted(relevant_facts, key=lambda pair: pair[1], reverse=True)]
-    else:
-        # Nothing scored — fall back to the raw fact list rather than
-        # silently sending zero facts to the LLM.
-        prioritized_facts = facts
-
-    # Pass the top facts and top 8 most relevant chunk texts to the LLM
     start_llm = time.perf_counter()
     answer, llm_metrics = generate_answer(question, prioritized_facts[:15], prioritized_snippets[:8])
     llm_latency = time.perf_counter() - start_llm
