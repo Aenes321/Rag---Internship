@@ -45,7 +45,7 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
     raw_entities = extract_entities(question)
     cleaned_entities = []
     for e in raw_entities:
-        norm = normalize(re.sub(r'^(the|a|an)\s+', '', e.strip(), flags=re.IGNORECASE))
+        norm = normalize(re.sub(r'^(the|a|an|in|on|at|of|for|with|by)\s+', '', e.strip(), flags=re.IGNORECASE))
         if norm and norm not in cleaned_entities:
             cleaned_entities.append(norm)
     compound_entities = [e for e in cleaned_entities if len(e.split()) > 1]
@@ -145,7 +145,9 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
     )
 
     start_llm = time.perf_counter()
-    answer, llm_metrics = generate_answer(question, prioritized_facts[:15], prioritized_snippets[:8])
+    prioritized_facts = prioritized_facts[:15]
+    prioritized_snippets= prioritized_snippets[:10]
+    answer, llm_metrics = generate_answer(question, prioritized_facts, prioritized_snippets)
     llm_latency = time.perf_counter() - start_llm
 
     total_latency = time.perf_counter() - start_total_time
@@ -154,6 +156,10 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
     llm_metrics["llm_latency_sec"] = round(llm_latency, 2)
     llm_metrics["total_rag_latency_sec"] = round(total_latency, 2)
 
+    llm_metrics["retrieved_facts"] = [
+        f"{f['source']} -> {f['relation']} -> {f['target']}" for f in facts
+    ]
+    llm_metrics["retrieved_snippets"] = prioritized_snippets
     return answer, llm_metrics
 
 

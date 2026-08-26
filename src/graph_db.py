@@ -72,13 +72,13 @@ class GraphDB:
         query = """
         MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk)
         WHERE e.name IN $entity_names
-        RETURN DISTINCT c.text AS source_text, count(e) AS match_count
-        ORDER BY match_count DESC
+        RETURN DISTINCT c.text AS source_text, count(e) AS score
+        ORDER BY score DESC
         LIMIT $limit
         """
         with self.driver.session() as session:
             result = session.run(query, entity_names=entity_names, limit=limit)
-            return [r["source_text"] for r in result]
+            return [record["source_text"] for record in result if record["source_text"]]
 
     def search_entities(self, query_text: str, limit: int = 5):
         cleaned = re.sub(r'^(the|a|an)\s+', '', query_text.strip(), flags=re.IGNORECASE)
@@ -100,15 +100,28 @@ class GraphDB:
             return [(record["name"], record["score"]) for record in result]
 
     def traverse(self, entity_names, hops: int = 2, limit: int = 25):
-        cypher = f"""
-        MATCH (n:Entity)-[r*1..{hops}]-(m:Entity)
-        WHERE n.name IN $entity_names
-        UNWIND r AS rel
-        UNWIND coalesce(rel.source_texts, [rel.source_text]) AS st
-        RETURN DISTINCT startNode(rel).name AS source,
-               type(rel) AS relation,
-               endNode(rel).name AS target,
-               st AS source_text
+        """
+        Retrieves a balanced set of facts across all queried entities
+        so generic hub nodes (like 'spatial neglect') do not starve
+        specific terms (like 'sensory extinction', 'vertical meridian').
+        """
+        cypher = """
+        UNWIND $entity_names AS seedName
+        MATCH (n:Entity {name: seedName})-[r]-(m:Entity)
+        WHERE type(r) <> 'MENTIONED_IN' AND type(r) <> 'CONTAINS_ENTITY'
+        WITH seedName, r, m
+        ORDER BY size(coalesce(r.source_texts[0], r.source_text, '')) DESC
+        WITH seedName, collect({
+            source: startNode(r).name,
+            relation: type(r),
+            target: endNode(r).name,
+            source_text: coalesce(r.source_texts[0], r.source_text, '')
+        })[..8] AS topEntityFacts
+        UNWIND topEntityFacts AS f
+        RETURN DISTINCT f.source AS source,
+               f.relation AS relation,
+               f.target AS target,
+               f.source_text AS source_text
         LIMIT $limit
         """
         with self.driver.session() as session:

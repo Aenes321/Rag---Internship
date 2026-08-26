@@ -242,7 +242,10 @@ def extract_triples(chunk_text: str):
         for token in sent:
             if token.pos_ in ("VERB", "AUX") or token.dep_ == "ROOT":
                 relation_label = taxonomy_rel if taxonomy_rel else token.lemma_.upper()
-                
+                is_negated = any(child.dep_ == "neg" or child.text.lower() in ("not", "never", "no", "fails",
+                 "failed") for child in token.children)
+                if is_negated:
+                    relation_label = f"DOES_NOT_{relation_label}"
                 if not taxonomy_rel and token.lemma_ in ("be", "have", "do", "use"):
                     continue
 

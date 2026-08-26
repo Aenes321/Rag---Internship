@@ -9,7 +9,7 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tu
         "stream": False,
         "options": {
             "temperature": 0.0,
-            "num_predict": 250,   # Stop after 250 tokens (prevents endless generation)
+            "num_predict": 300,   # Stop after 300 tokens (prevents endless generation)
         }
     }
     if system:
@@ -106,29 +106,32 @@ def humanize_relation(relation: str) -> str:
         return verb
     return " ".join(words)
 
-ANSWER_SYSTEM = """You are a medical information assistant. Answer the user's
-question using ONLY the facts and source text provided below. If the
-information isn't sufficient to answer, say so plainly. Be clear, concise,
-and do not invent information that isn't supported by the provided context. 
-
-CRITICAL FORMATTING INSTRUCTIONS:
-1.Answer ONLY what the user explicitly asked. Do NOT include side notes, extrapolations, or summaries of other topics present in the context (e.g., do NOT discuss future research, VR, hardware, or other topics unless directly asked in the question).
-1. Write in natural, fluid sentences and paragraphs.
-2. NEVER output raw relationship tags or uppercase keywords (e.g., DO NOT write "ASSESSED_BY", "AFFECTS", or "STIMULATE" in capital letters).
-3. Integrate entities and relations smoothly into grammatical prose.
-4. If the information isn't sufficient to give a definitive answer, state that clearly."""
-
+ANSWER_SYSTEM = """You are an expert medical information synthesizer. Your task is to provide accurate, direct, and complete answers based strictly on the provided context and graph facts."""
 
 def generate_answer(question: str, facts: list, source_snippets: list) -> str:
     facts_str = "\n".join(f"- {f['source']} {humanize_relation(f['relation'])} {f['target']}" for f in facts) or "(none)"
     sources_str = "\n---\n".join(source_snippets) or "(none)"
-    prompt = f"""Question: {question}
+    prompt = f"""CONTEXT:
+{sources_str}
 
 Graph facts:
 {facts_str}
 
-Source text excerpts:
-{sources_str}
+Question: 
+{question}
 
-Answer the question using only the information above."""
+CORE REASONING & SYNTHESIS PRINCIPLES:
+1. Direct Answering: Begin answering the user's specific question immediately in the first sentence. Never use filler introductions (e.g., "Spatial neglect and X are related...", "According to the provided text...", "In this study...").
+2. Answer directly and concisely in 1 single paragraph (3 to 4 sentences max). Do not repeat yourself.
+3. Comprehensive Multi-Part Coverage: If the user asks about multiple aspects (e.g., comparisons, mechanisms, metrics, or relationships), address each component thoroughly and accurately.
+4. Faithful Contrasts & Nuances: Only contrast two concepts if the context explicitly states that contrast. Do not invent asymmetrical claims (e.g., do not write "Unlike X, Y does..." unless the text explicitly states X does not).
+5. Strict Topic Relevance: Include ONLY facts and details that directly answer the query. Ignore background information, assessment scales, anatomical tracts, or unrelated technologies present in the context that were not asked about.
+6. Natural, Clean Medical Prose: 
+   - Write in fluid, professional clinical English.
+   - Do not include robotic meta-language (e.g., avoid "The context states", "The provided sources do not mention").
+   - Never output raw uppercase relationship tags (e.g., do not write "TREATS", "AFFECTS_REGION").
+7. Do not add boilerplate conclusions (do not write "further research is needed").
+    
+DIRECT ANSWER:"""
+    
     return _call_ollama(prompt, system=ANSWER_SYSTEM)
