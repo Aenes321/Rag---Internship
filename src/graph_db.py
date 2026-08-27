@@ -68,7 +68,7 @@ class GraphDB:
         with self.driver.session() as session:
             session.run(query, chunk_id=chunk_id, chunk_text=chunk_text, source_file=source_file, entities=entities)
         
-    def get_chunks_for_entities(self, entity_names: list, limit: int = 15):
+    def get_chunks_for_entities(self, entity_names: list, limit: int = 10):
         query = """
         MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk)
         WHERE e.name IN $entity_names
@@ -100,30 +100,31 @@ class GraphDB:
             return [(record["name"], record["score"]) for record in result]
 
     def traverse(self, entity_names, hops: int = 2, limit: int = 25):
-        """
-        Retrieves a balanced set of facts across all queried entities
-        so generic hub nodes (like 'spatial neglect') do not starve
-        specific terms (like 'sensory extinction', 'vertical meridian').
-        """
+        if not entity_names:
+            return []
+
+        per_seed_limit = max(1, limit // len(entity_names))
+        facts = []
+        seen = set()
+
         cypher = """
-        UNWIND $entity_names AS seedName
-        MATCH (n:Entity {name: seedName})-[r]-(m:Entity)
+        MATCH (n:Entity {name: $seed})-[r]-(m:Entity)
         WHERE type(r) <> 'MENTIONED_IN' AND type(r) <> 'CONTAINS_ENTITY'
-        WITH seedName, r, m
+        WITH r, m
         ORDER BY size(coalesce(r.source_texts[0], r.source_text, '')) DESC
-        WITH seedName, collect({
-            source: startNode(r).name,
-            relation: type(r),
-            target: endNode(r).name,
-            source_text: coalesce(r.source_texts[0], r.source_text, '')
-        })[..8] AS topEntityFacts
-        UNWIND topEntityFacts AS f
-        RETURN DISTINCT f.source AS source,
-               f.relation AS relation,
-               f.target AS target,
-               f.source_text AS source_text
-        LIMIT $limit
+        RETURN DISTINCT startNode(r).name AS source,
+            type(r) AS relation,
+            endNode(r).name AS target,
+            coalesce(r.source_texts[0], r.source_text, '') AS source_text
+        LIMIT $per_seed_limit
         """
         with self.driver.session() as session:
-            result = session.run(cypher, entity_names=entity_names, limit=limit)
-            return [dict(record) for record in result]
+            for seed in entity_names:
+                result = session.run(cypher, seed=seed, per_seed_limit=per_seed_limit)
+                for record in result:
+                    key = (record["source"], record["relation"], record["target"])
+                    if key not in seen:
+                        seen.add(key)
+                        facts.append(dict(record))
+
+        return facts[:limit]

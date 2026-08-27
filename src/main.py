@@ -46,12 +46,15 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
     cleaned_entities = []
     for e in raw_entities:
         norm = normalize(re.sub(r'^(the|a|an|in|on|at|of|for|with|by)\s+', '', e.strip(), flags=re.IGNORECASE))
-        if norm and norm not in cleaned_entities:
+        if norm and not is_generic_entity(norm) and norm not in cleaned_entities:
             cleaned_entities.append(norm)
     compound_entities = [e for e in cleaned_entities if len(e.split()) > 1]
     single_entities = [e for e in cleaned_entities if len(e.split()) == 1]
+
+    # Keep compound phrases + distinct single words (do not drop independent terms like 'saccades')
     search_pool = compound_entities + [
-        e for e in single_entities if not any(e in c.split() for c in compound_entities)
+        e for e in single_entities 
+        if not any(e in c.split() for c in compound_entities)
     ]
     ner_latency = time.perf_counter() - start_ner
 
@@ -66,6 +69,8 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
         "neo4j_latency_sec": 0.0,
         "llm_latency_sec": 0.0,
         "total_rag_latency_sec": round(time.perf_counter() - start_total_time, 2),
+        "retrieved_facts": [],
+        "retrieved_snippets": [],
     }
 
     print(f"  [entities extracted ({ner_latency:.2f}s): {search_pool}]")
@@ -74,29 +79,21 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
         return "Couldn't identify relevant entities in the question.", default_metrics
 
     start_neo4j = time.perf_counter()
-
-    # matched_scores: every node any entity matched, with its best Lucene score.
-    # seed_nodes: the subset used to actually seed graph traversal. Only
-    # compound-entity matches qualify -- single-word entities (e.g. "stroke",
-    # "usa") tend to be high-degree hub nodes in a domain-specific corpus, and
-    # traversing from a hub pulls in whatever topic dominates the corpus
-    # rather than anything specific to the question. Singles are still used
-    # below for scoring/filtering chunk text, just not for seeding traversal.
     matched_scores: dict[str, float] = {}
     seed_nodes: set[str] = set()
 
     for e in search_pool:
-        is_compound = len(e.split()) > 1
         results = db.search_entities(e, limit=3)
         if not results:
             continue
         best_score = max(score for _, score in results)
         for name, score in results:
-            if score < best_score * 0.5:  # discard results much weaker than this entity's best
+            if score < best_score * 0.5:
                 continue
             if name not in matched_scores or score > matched_scores[name]:
                 matched_scores[name] = score
-            if is_compound:
+
+            if len(e.split()) > 1:
                 seed_nodes.add(name)
 
     matched = list(matched_scores.keys())
@@ -107,10 +104,8 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
         default_metrics["total_rag_latency_sec"] = round(time.perf_counter() - start_total_time, 2)
         return "No matching information found in the graph.", default_metrics
 
+    # Fallback to the top-scoring match if all terms were generic
     if not seed_nodes:
-        # No compound entity found a graph match -- fall back to the single
-        # highest-confidence match rather than every generic node, to avoid
-        # hub-node topic drift dominating the traversal.
         seed_nodes = {max(matched_scores, key=matched_scores.get)}
 
     print(f"  [traversal seed nodes: {seed_nodes}]")
@@ -119,34 +114,27 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
     facts = db.traverse(list(seed_nodes))
     neo4j_latency = time.perf_counter() - start_neo4j
     print(f"  [graph facts retrieved ({neo4j_latency:.2f}s): {len(facts)} facts]")
-    if not facts:
+
+    fact_chunks = [f["source_text"] for f in facts if f.get("source_text")]
+    combined_snippets = list(dict.fromkeys(direct_chunks + fact_chunks))
+
+    # Only abort if BOTH facts AND text snippets are empty
+    if not facts and not combined_snippets:
         default_metrics["neo4j_latency_sec"] = round(neo4j_latency, 2)
         default_metrics["total_rag_latency_sec"] = round(time.perf_counter() - start_total_time, 2)
-        return "No related facts found in the graph.", default_metrics
+        return "No related information found in the graph.", default_metrics
 
-    combined = direct_chunks + [f["source_text"] for f in facts if f.get("source_text")]
-    snippets = list(dict.fromkeys(combined))
+    # Prioritize snippets by query relevance
+    scored_snippets = [(s, score_snippet(s, question, search_pool)) for s in combined_snippets]
+    relevant_snippets = [s for s, sc in sorted(scored_snippets, key=lambda pair: pair[1], reverse=True) if sc > 0]
+    prioritized_snippets = (relevant_snippets if relevant_snippets else combined_snippets)[:9]
 
-    # Score using the FULL entity set (not just compound_entities) -- singles
-    # like "stroke"/"usa" are weak signals but still meaningful for ranking
-    # text, even though they're excluded from seeding traversal above.
-    scored_snippets = [(s, score_snippet(s, question, search_pool)) for s in snippets]
-    relevant_snippets = [(s, sc) for s, sc in scored_snippets if sc > 0]
-    prioritized_snippets = (
-        [s for s, _ in sorted(relevant_snippets, key=lambda pair: pair[1], reverse=True)]
-        if relevant_snippets else snippets[:1]
-    )
-
+    # Prioritize facts by query relevance
     scored_facts = [(f, score_snippet(f.get("source_text", "") or "", question, search_pool)) for f in facts]
-    relevant_facts = [(f, sc) for f, sc in scored_facts if sc > 0]
-    prioritized_facts = (
-        [f for f, _ in sorted(relevant_facts, key=lambda pair: pair[1], reverse=True)]
-        if relevant_facts else facts
-    )
+    relevant_facts = [f for f, sc in sorted(scored_facts, key=lambda pair: pair[1], reverse=True) if sc > 0]
+    prioritized_facts = (relevant_facts if relevant_facts else facts)[:15]
 
     start_llm = time.perf_counter()
-    prioritized_facts = prioritized_facts[:15]
-    prioritized_snippets= prioritized_snippets[:10]
     answer, llm_metrics = generate_answer(question, prioritized_facts, prioritized_snippets)
     llm_latency = time.perf_counter() - start_llm
 
@@ -156,10 +144,12 @@ def answer_question(db: GraphDB, question: str) -> tuple[str, dict]:
     llm_metrics["llm_latency_sec"] = round(llm_latency, 2)
     llm_metrics["total_rag_latency_sec"] = round(total_latency, 2)
 
+    # Log the EXACT facts and snippets that were sent to the LLM
     llm_metrics["retrieved_facts"] = [
-        f"{f['source']} -> {f['relation']} -> {f['target']}" for f in facts
+        f"{f['source']} -> {f['relation']} -> {f['target']}" for f in prioritized_facts
     ]
     llm_metrics["retrieved_snippets"] = prioritized_snippets
+
     return answer, llm_metrics
 
 

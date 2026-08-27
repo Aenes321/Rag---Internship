@@ -14,7 +14,8 @@ PRONOUNS = {
     "myself", "yourself", "himself", "herself", "itself", "ourselves", "themselves"
 }
 
-LEADING_STRIP_WORDS = PRONOUNS | {"the", "a", "an", "some", "any", "such", "no"}
+LEADING_STRIP_WORDS = PRONOUNS | {"the", "a", "an", "some", "any", "such", "no","is", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "how", "why", "when", "where"}
 
 # Regex patterns for citations (e.g., "Choi et al.", "Choi et al. (2021)", "Choi et al., 2021")
 CITATION_PATTERN = re.compile(
