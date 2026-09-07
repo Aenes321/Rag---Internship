@@ -122,6 +122,15 @@ def is_generic_entity(entity_text: str) -> bool:
     return False
 
 STOP_ENTITIES = {
+    # Question & Meta-concept artifacts
+    "specific outcome measurements", "outcome measurements", "outcome measures", 
+    "outcomes", "significant improvement", "significant difference", "significantly higher", 
+    "improvements", "improvement", "randomized controlled trial", "the randomized controlled trial", 
+    "controlled trial", "rct", "conventional therapy", "conventional occupational therapy", 
+    "conventional neglect therapy", "effectiveness", "efficacy", "feasibility", 
+    "utility", "validity", "reliability", "scales", "scale", "score", "scores", 
+    "testing", "test", "tests", "measure", "measures", "measurement", "measurements",
+
     # Prompt & Question Artifacts
     "physically entail", "originally introduced", "describe how", "explain the", 
     "what is", "who introduced", "how does", "according to", "defined as",
@@ -133,7 +142,7 @@ STOP_ENTITIES = {
     "protocols", "method", "methods", "approach", "approaches", "procedure", 
     "procedures", "management", "care", "exposure", "regimen", "tasks", "task", "control group",
     "reading", "text", "string", "strings", "numerical string", 
-    "evaluation", "assessment", "task", "tasks", "recite", "reciting",
+    "evaluation", "assessment", "recite", "reciting",
     "reading/writing", "full-text", "heading", "training", "training session", "sessions", "session", "practice", "practices",
 
     # Broad Academic & Study Terminology

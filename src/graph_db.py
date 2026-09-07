@@ -109,7 +109,7 @@ class GraphDB:
 
         cypher = """
         MATCH (n:Entity {name: $seed})-[r]-(m:Entity)
-        WHERE type(r) <> 'MENTIONED_IN' AND type(r) <> 'CONTAINS_ENTITY'
+        WHERE type(r) <> 'MENTIONED_IN' AND type(r) <> 'CONTAINS_ENTITY' AND m.name IS NOT NULL
         WITH r, m
         ORDER BY size(coalesce(r.source_texts[0], r.source_text, '')) DESC
         RETURN DISTINCT startNode(r).name AS source,
@@ -128,3 +128,45 @@ class GraphDB:
                         facts.append(dict(record))
 
         return facts[:limit]
+    
+    def get_cooccurring_chunks(self, entity_names: list, limit: int = 6):
+        """Prioritize chunks where multiple entities from the question appear together."""
+        if not entity_names:
+            return []
+        query = """
+        MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk)
+        WHERE e.name IN $entity_names
+        WITH c, count(DISTINCT e) AS entity_overlap, collect(e.name) AS matched_ents
+        WHERE entity_overlap >= 2
+        RETURN c.text AS source_text, entity_overlap
+        ORDER BY entity_overlap DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            result = session.run(query, entity_names=entity_names, limit=limit)
+            return [r["source_text"] for r in result if r["source_text"]]
+
+    def traverse_subgraph(self, entity_names: list, limit: int = 20) -> list[dict]:
+        if not entity_names:
+            return []
+
+        if len(entity_names) >= 2:
+            cypher = """
+            MATCH (a:Entity), (b:Entity)
+            WHERE a.name IN $seeds AND b.name IN $seeds AND a <> b
+            MATCH p = shortestPath((a)-[*1..2]-(b))
+            WHERE ALL(n IN nodes(p) WHERE n:Entity) AND ALL(r IN relationships(p) WHERE type(r) <> 'MENTIONED_IN')
+            UNWIND relationships(p) AS r
+            RETURN DISTINCT startNode(r).name AS source,
+                            type(r) AS relation,
+                            endNode(r).name AS target,
+                            coalesce(r.source_texts[0], r.source_text, '') AS source_text
+            LIMIT $limit
+            """
+            with self.driver.session() as session:
+                result = session.run(cypher, seeds=entity_names, limit=limit)
+                path_facts = [dict(record) for record in result if record["target"] is not None]
+                if path_facts:
+                    return path_facts
+
+        return self.traverse(entity_names, limit=limit)

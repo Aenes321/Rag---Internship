@@ -1,6 +1,18 @@
 import json
 import requests
 import config
+import re
+
+def clean_llm_citations(text: str) -> str:
+    """Removes parenthetical citations like (Author et al., 2020) or [1, 2] from answers."""
+    # Remove bracketed numbers: [1], [1-3]
+    text = re.sub(r"\[\s*\d+(?:\s*[-–,]\s*\d+)*\s*\]", "", text)
+    # Remove author citations: (Author et al., 2020), (Smith, 2019; Jones, 2021)
+    text = re.sub(r"\([A-Z][A-Za-z\s–\-]+,?\s*(?:et\s*al\.?,?)?\s*\d{4}[a-z]?(?:;[^\)]+)?\)", "", text)
+    # Collapse double spaces and clean punctuation gaps
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
 
 def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tuple[str, dict]:
     payload = {
@@ -9,26 +21,24 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tu
         "stream": False,
         "options": {
             "temperature": 0.0,
-            "num_predict": 300,   # Stop after 300 tokens (prevents endless generation)
+            "num_predict": 500,   # Increased from 300 to eliminate cut-offs
         }
     }
     if system:
         payload["system"] = system
     if json_mode:
         payload["format"] = "json"
-    timeout_limit = 180  # seconds
-    try :
-        response = requests.post(f"{config.OLLAMA_URL}/api/generate", json=payload, timeout=180)
+
+    timeout_limit = 180
+    try:
+        response = requests.post(f"{config.OLLAMA_URL}/api/generate", json=payload, timeout=timeout_limit)
         response.raise_for_status()
         data = response.json()
 
-        # Ollama returns durations in nanoseconds (1 second = 1e9 nanoseconds)
         eval_count = data.get("eval_count", 0)
         eval_duration_sec = data.get("eval_duration", 0) / 1e9
-
         prompt_eval_count = data.get("prompt_eval_count", 0)
         prompt_eval_sec = data.get("prompt_eval_duration", 0) / 1e9
-
         total_duration_sec = data.get("total_duration", 0) / 1e9
 
         metrics = {
@@ -38,14 +48,11 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tu
             "generation_eval_latency": round(eval_duration_sec, 2),
             "generated_tokens": eval_count,
             "generation_speed_tok_sec": round(eval_count / eval_duration_sec, 2) if eval_duration_sec > 0 else 0,
-            
             "llm_latency_sec": round(total_duration_sec, 2),
         }
+        return data["response"].strip(), metrics
 
-        return data["response"], metrics
-    
     except requests.exceptions.Timeout:
-        print("  [WARNING] Ollama request timed out.")
         return "Error: LLM response timed out.", {
             "prompt_tokens": 0, "generated_tokens": 0,
             "generation_speed_tok_sec": 0.0, "prompt_speed_tok_sec": 0.0,
@@ -53,19 +60,6 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tu
         }
 
 
-ENTITY_SYSTEM = """You are an expert medical and neurorehabilitation entity extractor.
-Extract all key concepts, medical entities, physiological measures, technologies, and study citations mentioned in the user's question.
-Return ONLY valid JSON: {"entities": ["...", "..."]}
-Keep each entity short (a few words)."""
-
-
-def extract_query_entities(question: str):
-    raw = _call_ollama(question, system=ENTITY_SYSTEM, json_mode=True)
-    try:
-        data = json.loads(raw)
-        return data.get("entities", [])
-    except (json.JSONDecodeError, AttributeError):
-        return []
 RELATION_TEMPLATES = {
     "NO_DIFFERENCE_IN": "showed no significant difference in",
     "SHOWED_IMPROVEMENT_IN": "showed significant improvement in",
@@ -85,13 +79,8 @@ RELATION_TEMPLATES = {
 }
 
 def humanize_relation(relation: str) -> str:
-    """Convert a Cypher relation type (fixed taxonomy or dynamic verb-lemma
-    fallback) into a natural-language phrase for prompting."""
     if relation in RELATION_TEMPLATES:
         return RELATION_TEMPLATES[relation]
-
-    # Dynamic fallback relations from ner.py are token.lemma_.upper(), e.g.
-    # "STIMULATE", "PREDICT", "SHARE" -> best-effort present-tense verb.
     words = relation.replace("_", " ").lower().split()
     if not words:
         return "is related to"
@@ -106,32 +95,31 @@ def humanize_relation(relation: str) -> str:
         return verb
     return " ".join(words)
 
-ANSWER_SYSTEM = """You are an expert medical information synthesizer. Your task is to provide accurate, direct, and complete answers based strictly on the provided context and graph facts."""
 
-def generate_answer(question: str, facts: list, source_snippets: list) -> str:
+ANSWER_SYSTEM = """You are a precise medical synthesizer. Provide compact, direct, and factually exact clinical answers strictly from the context."""
+
+def generate_answer(question: str, facts: list, source_snippets: list) -> tuple[str, dict]:
     facts_str = "\n".join(f"- {f['source']} {humanize_relation(f['relation'])} {f['target']}" for f in facts) or "(none)"
     sources_str = "\n---\n".join(source_snippets) or "(none)"
+
     prompt = f"""CONTEXT:
 {sources_str}
 
-Graph facts:
+GRAPH FACTS:
 {facts_str}
 
-Question: 
+QUESTION:
 {question}
 
-CORE REASONING & SYNTHESIS PRINCIPLES:
-1. Direct Answering: Begin answering the user's specific question immediately in the first sentence. Never use filler introductions (e.g., "Spatial neglect and X are related...", "According to the provided text...", "In this study...").
-2. Answer directly and concisely in 1 single paragraph (3 to 4 sentences max). Do not repeat yourself.
-3. Comprehensive Multi-Part Coverage: If the user asks about multiple aspects (e.g., comparisons, mechanisms, metrics, or relationships), address each component thoroughly and accurately.
-4. Faithful Contrasts & Nuances: Only contrast two concepts if the context explicitly states that contrast. Do not invent asymmetrical claims (e.g., do not write "Unlike X, Y does..." unless the text explicitly states X does not).
-5. Strict Topic Relevance: Include ONLY facts and details that directly answer the query. Ignore background information, assessment scales, anatomical tracts, or unrelated technologies present in the context that were not asked about.
-6. Natural, Clean Medical Prose: 
-   - Write in fluid, professional clinical English.
-   - Do not include robotic meta-language (e.g., avoid "The context states", "The provided sources do not mention").
-   - Never output raw uppercase relationship tags (e.g., do not write "TREATS", "AFFECTS_REGION").
-7. Do not add boilerplate conclusions (do not write "further research is needed").
-    
-DIRECT ANSWER:"""
-    
-    return _call_ollama(prompt, system=ANSWER_SYSTEM)
+CRITICAL RULES:
+1. Answer directly in the very first sentence.
+2. Keep the answer strictly within 2 to 3 concise sentences. Do not provide background introductions.
+3. If comparing two things, only state contrasts explicitly confirmed in the context.
+4. Do not include any author names or year citations. State only the facts.
+
+
+ANSWER:"""
+
+    raw_answer, metrics = _call_ollama(prompt, system=ANSWER_SYSTEM)
+    cleaned_answer = clean_llm_citations(raw_answer)
+    return cleaned_answer, metrics
