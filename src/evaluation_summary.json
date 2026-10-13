@@ -1,13 +1,13 @@
 {
-    "mean_cosine_similarity": 0.8204,
-    "mean_bertscore_precision": 0.9163,
-    "mean_bertscore_recall": 0.9122,
-    "mean_bertscore_f1": 0.9142,
-    "mean_generation_speed_tok_sec": 14.44,
-    "mean_prompt_speed_tok_sec": 118.27,
-    "mean_ner_latency_sec": 0.06,
-    "mean_neo4j_latency_sec": 0.17,
-    "mean_llm_latency_sec": 27.62,
-    "mean_total_rag_latency_sec": 27.86,
-    "total_samples_evaluated": 10
+    "mean_cosine_similarity": 0.8218,
+    "mean_bertscore_precision": 0.9131,
+    "mean_bertscore_recall": 0.887,
+    "mean_bertscore_f1": 0.8997,
+    "mean_generation_speed_tok_sec": 17.64,
+    "mean_prompt_speed_tok_sec": 134.98,
+    "mean_ner_latency_sec": 0.05,
+    "mean_neo4j_latency_sec": 0.3,
+    "mean_llm_latency_sec": 20.24,
+    "mean_total_rag_latency_sec": 20.59,
+    "total_samples_evaluated": 15
 }

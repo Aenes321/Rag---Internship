@@ -16,13 +16,13 @@ services:
       timeout: 5s
       retries: 10
 
-  ollama:
-    image: ollama/ollama
-    container_name: graphrag-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
+  #ollama:
+  #  image: ollama/ollama
+  #  container_name: graphrag-ollama
+  #  ports:
+  #    - "11434:11434"
+  #  volumes:
+  #    - ollama_data:/root/.ollama
     # Uncomment if using GPU:
     # deploy:
     #   resources:
@@ -37,7 +37,7 @@ services:
     container_name: graphrag-app
     depends_on:
       - neo4j
-      - ollama
+      #- ollama
     volumes:
       - .:/app                         # Mount whole root directory so CSV/JSON evaluation files persist
       - huggingface_cache:/root/.cache  # Cache HuggingFace models so they don't re-download
@@ -51,5 +51,5 @@ services:
 
 volumes:
   neo4j_data:
-  ollama_data:
+  #ollama_data:
   huggingface_cache:                   # Added persistent volume for evaluation models
