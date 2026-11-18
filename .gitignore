@@ -1,0 +1,12 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Debug dump written by ingest.py on every run
+src/pdf_to_text.txt
