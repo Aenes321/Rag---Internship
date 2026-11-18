@@ -53,7 +53,6 @@ Question ──► NER ──► fulltext entity match ──► graph traversal
 | `src/reset.py` | Deletes every node and relationship in the graph |
 | `src/evaluate.py` | `RAGEvaluator`: cosine similarity and BERTScore |
 | `src/run_evaluation.py` | Runs the test set through the pipeline and scores it |
-| `src/run_evaluation_drive.py` | Template for running the same evaluation on another (embedding-based) RAG system; fill in the `embed` / `retrieve` placeholders |
 | `src/evaluation_results.*`, `src/evaluation_summary.json` | Output of the latest evaluation run |
 | `src/pdf_to_text.txt` | Debug dump of the last PDF's cleaned text, written during ingestion |
 
