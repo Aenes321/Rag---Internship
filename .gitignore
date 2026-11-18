@@ -10,3 +10,6 @@ __pycache__/
 
 # Debug dump written by ingest.py on every run
 src/pdf_to_text.txt
+
+# Source papers are kept locally, not in the repo
+pdfs/*.pdf

@@ -39,7 +39,7 @@ Question ──► NER ──► fulltext entity match ──► graph traversal
 
 | Path | Purpose |
 |---|---|
-| `pdfs/` | Source papers to ingest (every `*.pdf` in here is processed) |
+| `pdfs/` | Source papers to ingest (every `*.pdf` in here is processed). The papers are not included in the repo; add your own. |
 | `test_set.csv` | Evaluation set: `question`, `reference_answer` |
 | `Dockerfile`, `docker-compose.yml` | Neo4j + Python app containers |
 | `requirements.txt` | Python dependencies (CPU PyTorch) |
@@ -101,6 +101,8 @@ docker compose up -d --build
 This starts `graphrag-neo4j` (Neo4j 5 with APOC) and `graphrag-app`. The project root is mounted into the app container at `/app`, so evaluation output written there appears in your working tree. HuggingFace models are cached in a named volume.
 
 ### 4. Build the graph
+
+Put the papers you want to index in `pdfs/`. The repo doesn't include them, and `pdfs/*.pdf` is git-ignored.
 
 ```bash
 # optional: clear a previous graph first
