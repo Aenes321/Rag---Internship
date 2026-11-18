@@ -14,6 +14,14 @@ def clean_llm_citations(text: str) -> str:
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
 
+def _error_metrics(latency: float) -> dict:
+    return {
+        "prompt_tokens": 0, "generated_tokens": 0,
+        "generation_speed_tok_sec": 0.0, "prompt_speed_tok_sec": 0.0,
+        "llm_latency_sec": round(latency, 2), "prompt_eval_latency": 0.0, "generation_eval_latency": 0.0,
+    }
+
+
 def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tuple[str, dict]:
     payload = {
         "model": config.OLLAMA_MODEL,
@@ -22,6 +30,10 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tu
         "options": {
             "temperature": 0.0,
             "num_predict": 500,   # Increased from 300 to eliminate cut-offs
+            # Ollama's default context window is small (2048/4096 depending on
+            # version) and it silently drops the *start* of over-long prompts,
+            # i.e. the retrieved CONTEXT. Prompts here reach ~3k tokens.
+            "num_ctx": config.OLLAMA_NUM_CTX,
         }
     }
     if system:
@@ -53,11 +65,11 @@ def _call_ollama(prompt: str, system: str = None, json_mode: bool = False) -> tu
         return data["response"].strip(), metrics
 
     except requests.exceptions.Timeout:
-        return "Error: LLM response timed out.", {
-            "prompt_tokens": 0, "generated_tokens": 0,
-            "generation_speed_tok_sec": 0.0, "prompt_speed_tok_sec": 0.0,
-            "llm_latency_sec": timeout_limit, "prompt_eval_latency": 0.0, "generation_eval_latency": 0.0
-        }
+        return "Error: LLM response timed out.", _error_metrics(timeout_limit)
+    except (requests.exceptions.RequestException, ValueError, KeyError) as exc:
+        # Connection refused, HTTP errors, malformed JSON / missing "response".
+        # Previously these propagated and aborted the whole evaluation loop.
+        return f"Error: LLM request failed ({type(exc).__name__}: {exc}).", _error_metrics(0.0)
 
 
 RELATION_TEMPLATES = {
@@ -78,7 +90,31 @@ RELATION_TEMPLATES = {
     "ASSOCIATED_WITH": "is associated with",
 }
 
+NEGATED_TEMPLATES = {
+    "NO_DIFFERENCE_IN": "showed a significant difference in",
+    "SHOWED_IMPROVEMENT_IN": "did not show significant improvement in",
+    "MANIFESTS_AS": "does not manifest as",
+    "ASSESSED_BY": "is not assessed by",
+    "AFFECTS_REGION": "does not affect",
+    "SUBTYPE_OF": "is not a subtype of",
+    "TREATS": "does not treat",
+    "CAUSES": "does not cause",
+    "HAS_SYMPTOM": "does not have the symptom of",
+    "RISK_FACTOR_FOR": "is not a risk factor for",
+    "INTERACTS_WITH": "does not interact with",
+    "DIAGNOSED_BY": "is not diagnosed by",
+    "COMPLICATION_OF": "is not a complication of",
+    "PREVENTS": "does not prevent",
+    "ASSOCIATED_WITH": "is not associated with",
+}
+
 def humanize_relation(relation: str) -> str:
+    if relation.startswith("DOES_NOT_"):
+        base = relation[len("DOES_NOT_"):]
+        if base in NEGATED_TEMPLATES:
+            return NEGATED_TEMPLATES[base]
+        # Lemma-based relations are already in base form ("IMPROVE", "REDUCE").
+        return "does not " + (" ".join(base.replace("_", " ").lower().split()) or "relate to")
     if relation in RELATION_TEMPLATES:
         return RELATION_TEMPLATES[relation]
     words = relation.replace("_", " ").lower().split()
@@ -96,7 +132,12 @@ def humanize_relation(relation: str) -> str:
     return " ".join(words)
 
 
-ANSWER_SYSTEM = """You are a precise medical synthesizer. Provide compact, direct, and factually exact clinical answers strictly from the context."""
+ANSWER_SYSTEM = (
+    "You are an expert clinical and neuroscientific researcher. "
+    "Provide comprehensive, factually exact answers based strictly on the provided context. "
+    "Include all relevant clinical metrics, percentages, test names, anatomical structures, "
+    "and subgroup comparisons mentioned in the context that address every part of the question."
+)
 
 def generate_answer(question: str, facts: list, source_snippets: list) -> tuple[str, dict]:
     facts_str = "\n".join(f"- {f['source']} {humanize_relation(f['relation'])} {f['target']}" for f in facts) or "(none)"
@@ -105,18 +146,18 @@ def generate_answer(question: str, facts: list, source_snippets: list) -> tuple[
     prompt = f"""CONTEXT:
 {sources_str}
 
-GRAPH FACTS:
+SUPPORTING GRAPH FACTS:
 {facts_str}
 
 QUESTION:
 {question}
 
 CRITICAL RULES:
-1. Answer directly in the very first sentence.
-2. Keep the answer strictly within 2 to 3 concise sentences. Do not provide background introductions.
-3. If comparing two things, only state contrasts explicitly confirmed in the context.
-4. Do not include any author names or year citations. State only the facts.
-
+1. Answer directly and immediately in the first sentence without meta-introductions (e.g., do not say "Based on the context" or "According to the study").
+2. Address EVERY part of the question thoroughly (typically 3 to 6 sentences depending on question complexity).
+3. Explicitly include specific clinical details present in the context: exact percentages, sample sizes, dollar amounts, assessment scale names (and abbreviations), anatomical tracts/regions, and which outcomes were statistically significant versus non-significant.
+4. Prioritize the exact wording and findings in CONTEXT over SUPPORTING GRAPH FACTS if a graph fact looks truncated.
+5. Do not include inline author citations or publication years (e.g., omit "(Smith et al., 2020)" or "[1]").
 
 ANSWER:"""
 

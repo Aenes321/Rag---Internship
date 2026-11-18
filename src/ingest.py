@@ -4,14 +4,39 @@ import fitz  # PyMuPDF
 import unicodedata
 import config
 from graph_db import GraphDB
-from ner import extract_triples, extract_entities, get_nlp, is_generic_entity
+from ner import extract_triples, extract_entities, get_nlp, is_generic_entity, normalize_entity
 import re
+from collections import Counter
 
 def fix_pdf_ligatures(text: str) -> str:
     """
     Systematically removes false spaces created by PDF font ligatures (fi, ff, fl, ffi, ffl),
     kerning artifacts (Th), and hyphenation remnants.
     """
+    # Handle 3-part split ligatures FIRST (e.g. "bene fi cial" -> "beneficial").
+    # This must run before the 2-part rules below, otherwise they consume the
+    # standalone ligature fragment ("fi cial" -> "ficial") and leave "bene ficial".
+    three_part = re.compile(r"\b([A-Za-z]+)\s+(ffi|ffl|fi|fl|ff)\s+([a-z]{2,})\b", re.IGNORECASE)
+    token_counts = Counter(w.lower() for w in re.findall(r"[A-Za-z]+", text))
+    fragment_left_counts = Counter(m.group(1).lower() for m in three_part.finditer(text))
+
+    def fix_three_part(m):
+        left, lig, right = m.group(1), m.group(2), m.group(3)
+        joined = left + lig + right
+        left_l = left.lower()
+        # Is the left part a real standalone word elsewhere in the document
+        # (e.g. "the fi rst", "high fl ow") rather than a word fragment ("signi")?
+        left_is_word = token_counts[left_l] - fragment_left_counts[left_l] > 0
+        if (
+            joined.lower() in token_counts        # joined form seen unsplit in the doc
+            or lig.lower().startswith("ff")       # no English word starts with "ff"
+            or not left_is_word
+        ):
+            return joined
+        return f"{left} {lig}{right}"
+
+    text = three_part.sub(fix_three_part, text)
+
     # "Th " kerning splits at word start (e.g., "Th e" -> "The", "Th is" -> "This")
     th_words = r"(e|is|ese|ose|ere|us|ree|ird|rough|roughout|en|an)"
     text = re.sub(r"\bTh\s+" + th_words + r"\b", r"Th\1", text)
@@ -56,14 +81,6 @@ def fix_pdf_ligatures(text: str) -> str:
     text = re.sub(
         r"\b([A-Za-z]*ff)\s+([a-z]+)\b",
         fix_ff_match,
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    # Handle 3-part split ligatures (e.g. "bene fi cial" -> "beneficial")
-    text = re.sub(
-        r"\b([a-z]{2,})\s+(fi|fl|ff)\s+([a-z]{2,})\b",
-        r"\1\2\3",
         text,
         flags=re.IGNORECASE,
     )
@@ -114,9 +131,11 @@ def remove_inline_citations_safely(text: str) -> str:
         text,
     )
 
-    # Citations glued directly to the end of a word (e.g. "hemiplegia9", "paretic side11")
+    # Citations glued directly to the end of a word (e.g. "hemiplegia9", "paretic side11").
+    # Only strip after a lowercase word of 3+ letters (or ')' / '%') so alphanumeric
+    # terms such as "CO2", "T1", "BA40", "MoCA30" or "rs12" keep their digits.
     glued_citation = re.compile(
-        r"(?P<prefix>[A-Za-z%\)])"
+        r"(?P<prefix>(?<=[a-z]{2})[a-z]|[%\)])"
         r"(?P<lead>[.,;]?)"
         r"\d{1,3}(?:\s*[,–-]\s*\d{1,3})*"
         r"(?!\s*(?:mg|g|kg|ml|cm|mm|m|hz|min|mins|sec|secs|hours|hrs|days|weeks|months|years|patients|subjects|controls|%|version|points|score|scores|group|table|figure|box)\b)"
@@ -206,9 +225,14 @@ def load_pdf_text(path: str) -> str:
 
     full_text = "\n\n".join(body_blocks)
 
-    ref_match = re.search(r"__REF_START__", full_text)
-    if ref_match and ref_match.start() > len(full_text) * 0.5:
-        full_text = full_text[:ref_match.start()]
+    # Cut at the first "References" marker located in the second half of the
+    # document (earlier hits are usually in-text mentions), then strip any
+    # leftover markers so the sentinel never leaks into chunks or the graph.
+    for ref_match in re.finditer(r"__REF_START__", full_text):
+        if ref_match.start() > len(full_text) * 0.5:
+            full_text = full_text[:ref_match.start()]
+            break
+    full_text = full_text.replace("__REF_START__", "")
 
     full_text = re.sub(r"(\w)-\n\s*(\w)", r"\1\2", full_text)
     full_text = fix_pdf_ligatures(full_text)
@@ -301,17 +325,8 @@ def chunk_text(text: str, chunk_size: int, overlap_sentences: int = 1):
         chunks.append(" ".join(current))
     return chunks
 
-CANONICAL_ENTITIES = {
-    "vr": "virtual reality",
-    "rct": "randomized controlled trial",
-    "usn": "unilateral spatial neglect",
-}
-
-def normalize(name: str) -> str:
-    norm = " ".join(name.strip().lower().split())
-    if norm in CANONICAL_ENTITIES:
-        return CANONICAL_ENTITIES[norm]
-    return norm
+# Shared with main.py (query time) so ingest and retrieval normalize identically.
+normalize = normalize_entity
 
 
 def main():

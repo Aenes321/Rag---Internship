@@ -53,7 +53,12 @@ def run_rag_and_evaluate(
             q = row["question"]
             print(f"  Processing Question {idx + 1}/{len(test_df)}: {q[:60]}...")
             
-            gen_ans, metrics = answer_question(db, q)
+            try:
+                gen_ans, metrics = answer_question(db, q)
+            except Exception as exc:
+                # Keep going so answers already generated aren't lost.
+                print(f"  [ERROR] Question {idx + 1} failed: {type(exc).__name__}: {exc}")
+                gen_ans, metrics = f"Error: RAG pipeline failed ({type(exc).__name__}).", {}
 
             if metrics:
                 print("=" * 50)

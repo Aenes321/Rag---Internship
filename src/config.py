@@ -9,6 +9,7 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "demopassword12")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 
 PDF_DIR = os.getenv("PDF_DIR", "../pdfs")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
